@@ -9,6 +9,8 @@ import {
   Grid,
   Typography,
   Paper,
+  Collapse,
+  IconButton,
 } from "@mui/material";
 import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import ErrorIcon from "@mui/icons-material/Error";
@@ -16,6 +18,9 @@ import HourglassEmptyIcon from "@mui/icons-material/HourglassEmpty";
 import StorageIcon from "@mui/icons-material/Storage";
 import HubIcon from "@mui/icons-material/Hub";
 import MemoryIcon from "@mui/icons-material/Memory";
+import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
+import ExpandLessIcon from "@mui/icons-material/ExpandLess";
+import RefreshIcon from "@mui/icons-material/Refresh";
 
 interface StatusPanelProps {
   ddClient: any;
@@ -25,7 +30,11 @@ interface HealthStatus {
   status: string;
   hindsight: boolean;
   message?: string;
+  last_error?: string;
+  hindsight_url?: string;
   details?: any;
+  code?: number;
+  body?: string;
 }
 
 interface AppStatus {
@@ -34,19 +43,27 @@ interface AppStatus {
   mcp_endpoint: string;
   api_endpoint: string;
   ui_endpoint: string;
+  hindsight_url?: string;
+  error?: string;
 }
 
 export default function StatusPanel({ ddClient }: StatusPanelProps) {
   const [health, setHealth] = useState<HealthStatus | null>(null);
   const [status, setStatus] = useState<AppStatus | null>(null);
   const [loading, setLoading] = useState(true);
+  const [detailsOpen, setDetailsOpen] = useState(false);
 
   const fetchData = async () => {
     try {
       const healthRes = await ddClient.extension.vm?.service?.get("/health");
       setHealth(healthRes);
-    } catch {
-      setHealth({ status: "error", hindsight: false, message: "Cannot reach backend" });
+    } catch (e: any) {
+      setHealth({
+        status: "error",
+        hindsight: false,
+        message: "Cannot reach backend service",
+        last_error: e?.message || String(e),
+      });
     }
     try {
       const statusRes = await ddClient.extension.vm?.service?.get("/status");
@@ -74,6 +91,23 @@ export default function StatusPanel({ ddClient }: StatusPanelProps) {
 
   const isRunning = health?.hindsight === true;
 
+  const statusLabel = health?.status ?? "unknown";
+  const statusColor: "success" | "warning" | "error" = isRunning
+    ? "success"
+    : health?.status === "starting"
+    ? "warning"
+    : "error";
+
+  const statusDescription = isRunning
+    ? `Connected to ${health?.hindsight_url ?? "Hindsight"}`
+    : health?.status === "starting"
+    ? health?.message || "Hindsight is initializing..."
+    : health?.status === "error"
+    ? health?.message || "Cannot reach backend service"
+    : health?.status === "unhealthy"
+    ? `Hindsight returned HTTP ${health?.code ?? "error"}`
+    : "Unknown state";
+
   return (
     <Box>
       <Grid container spacing={3}>
@@ -83,6 +117,9 @@ export default function StatusPanel({ ddClient }: StatusPanelProps) {
               <Box display="flex" alignItems="center" gap={1} mb={1}>
                 <StorageIcon color="primary" />
                 <Typography variant="h6">Hindsight Engine</Typography>
+                <IconButton size="small" onClick={fetchData} sx={{ ml: "auto" }}>
+                  <RefreshIcon fontSize="small" />
+                </IconButton>
               </Box>
               <Chip
                 icon={
@@ -94,10 +131,13 @@ export default function StatusPanel({ ddClient }: StatusPanelProps) {
                     <ErrorIcon />
                   )
                 }
-                label={health?.status ?? "unknown"}
-                color={isRunning ? "success" : health?.status === "starting" ? "warning" : "error"}
+                label={statusLabel}
+                color={statusColor}
                 sx={{ mt: 1 }}
               />
+              <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+                {statusDescription}
+              </Typography>
             </CardContent>
           </Card>
         </Grid>
@@ -134,6 +174,53 @@ export default function StatusPanel({ ddClient }: StatusPanelProps) {
           </Card>
         </Grid>
       </Grid>
+
+      {!isRunning && (
+        <Alert
+          severity={health?.status === "starting" ? "info" : "warning"}
+          sx={{ mt: 2 }}
+          action={
+            <IconButton size="small" onClick={() => setDetailsOpen(!detailsOpen)}>
+              {detailsOpen ? <ExpandLessIcon /> : <ExpandMoreIcon />}
+            </IconButton>
+          }
+        >
+          {health?.status === "starting" ? (
+            <>Hindsight is starting up. The embedded Postgres database takes 10-15 seconds to initialize on first launch.</>
+          ) : health?.status === "error" ? (
+            <>Cannot reach the backend service. The extension VM may still be starting.</>
+          ) : (
+            <>Hindsight is not healthy. Check the details below for more information.</>
+          )}
+        </Alert>
+      )}
+
+      {!isRunning && (
+        <Collapse in={detailsOpen}>
+          <Paper variant="outlined" sx={{ p: 2, mt: 1, bgcolor: "background.default" }}>
+            <Typography variant="subtitle2" gutterBottom>
+              Diagnostics
+            </Typography>
+            <Typography component="pre" variant="body2" fontFamily="monospace" fontSize={12} sx={{ whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
+              {JSON.stringify(
+                {
+                  health_status: health?.status,
+                  hindsight_reachable: health?.hindsight,
+                  hindsight_url: health?.hindsight_url,
+                  message: health?.message,
+                  last_error: health?.last_error,
+                  http_code: health?.code,
+                  response_body: health?.body,
+                  status_error: status?.error,
+                  status_hindsight_url: status?.hindsight_url,
+                },
+                null,
+                2
+              )}
+            </Typography>
+          </Paper>
+        </Collapse>
+      )}
 
       <Paper sx={{ p: 3, mt: 3 }}>
         <Typography variant="h6" gutterBottom>
@@ -197,13 +284,6 @@ export default function StatusPanel({ ddClient }: StatusPanelProps) {
           </Paper>
         </Box>
       </Paper>
-
-      {!isRunning && (
-        <Alert severity="info" sx={{ mt: 2 }}>
-          Hindsight is starting up. The embedded Postgres database takes 10-15 seconds to
-          initialize on first launch. Please wait...
-        </Alert>
-      )}
     </Box>
   );
 }

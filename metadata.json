@@ -4,10 +4,16 @@
     "dashboard-tab": {
       "title": "Agent Memory",
       "root": "/ui",
-      "src": "index.html"
+      "src": "index.html",
+      "backend": {
+        "socket": "agent-memory.sock"
+      }
     }
   },
   "vm": {
-    "composefile": "compose.yaml"
+    "composefile": "compose.yaml",
+    "exposes": {
+      "socket": "agent-memory.sock"
+    }
   }
 }

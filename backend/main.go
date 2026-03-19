@@ -12,11 +12,59 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
 
-const hindsightBase = "http://hindsight:8888"
+// hindsightURLs lists the candidate base URLs for the Hindsight API.
+// The backend tries each in order and caches the first one that responds.
+var hindsightURLs = []string{
+	"http://hindsight:8888",
+	"http://localhost:8888",
+	"http://127.0.0.1:8888",
+}
+
+var (
+	resolvedBase   string
+	resolvedBaseMu sync.RWMutex
+)
+
+// getHindsightBase returns the cached base URL or probes all candidates.
+func getHindsightBase() string {
+	resolvedBaseMu.RLock()
+	base := resolvedBase
+	resolvedBaseMu.RUnlock()
+	if base != "" {
+		return base
+	}
+	return probeHindsight()
+}
+
+// probeHindsight tries each candidate URL and caches the first healthy one.
+func probeHindsight() string {
+	client := &http.Client{Timeout: 3 * time.Second}
+	for _, u := range hindsightURLs {
+		resp, err := client.Get(u + "/health")
+		if err == nil {
+			resp.Body.Close()
+			log.Printf("hindsight discovered at %s", u)
+			resolvedBaseMu.Lock()
+			resolvedBase = u
+			resolvedBaseMu.Unlock()
+			return u
+		}
+	}
+	// Return first candidate so callers still get a meaningful error
+	return hindsightURLs[0]
+}
+
+// resetHindsightBase clears the cache so the next call re-probes.
+func resetHindsightBase() {
+	resolvedBaseMu.Lock()
+	resolvedBase = ""
+	resolvedBaseMu.Unlock()
+}
 
 func main() {
 	var socketPath string
@@ -41,7 +89,12 @@ func main() {
 	mux.HandleFunc("/recall", handleRecall)
 	mux.HandleFunc("/config", handleConfig)
 
-	server := &http.Server{Handler: mux}
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		log.Printf(">> %s %s", r.Method, r.URL.Path)
+		mux.ServeHTTP(w, r)
+	})
+
+	server := &http.Server{Handler: handler}
 
 	go func() {
 		log.Printf("backend listening on %s", socketPath)
@@ -62,7 +115,8 @@ func main() {
 
 // proxyToHindsight forwards a request to the Hindsight API and writes the response back.
 func proxyToHindsight(w http.ResponseWriter, method, path string, body io.Reader) {
-	url := hindsightBase + path
+	base := getHindsightBase()
+	url := base + path
 	req, err := http.NewRequest(method, url, body)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("create request: %v", err)})
@@ -73,8 +127,10 @@ func proxyToHindsight(w http.ResponseWriter, method, path string, body io.Reader
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
+		// Clear cache so next request re-probes
+		resetHindsightBase()
 		writeJSON(w, http.StatusBadGateway, map[string]string{
-			"error":   fmt.Sprintf("hindsight unreachable: %v", err),
+			"error":   fmt.Sprintf("hindsight unreachable at %s: %v", base, err),
 			"details": "Hindsight may still be starting up. It takes 10-15 seconds for Postgres to initialize.",
 		})
 		return
@@ -92,43 +148,69 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get(hindsightBase + "/health")
-	if err != nil {
+	// Try each candidate URL to find hindsight
+	client := &http.Client{Timeout: 2 * time.Second}
+	var lastErr error
+	var triedURLs []string
+
+	for _, base := range hindsightURLs {
+		triedURLs = append(triedURLs, base)
+		resp, err := client.Get(base + "/health")
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		defer resp.Body.Close()
+
+		body, _ := io.ReadAll(resp.Body)
+
+		// Cache this working URL
+		resolvedBaseMu.Lock()
+		resolvedBase = base
+		resolvedBaseMu.Unlock()
+
+		if resp.StatusCode == http.StatusOK {
+			var healthData interface{}
+			if json.Unmarshal(body, &healthData) == nil {
+				writeJSON(w, http.StatusOK, map[string]interface{}{
+					"status":         "running",
+					"hindsight":      true,
+					"hindsight_url":  base,
+					"details":        healthData,
+				})
+			} else {
+				writeJSON(w, http.StatusOK, map[string]interface{}{
+					"status":         "running",
+					"hindsight":      true,
+					"hindsight_url":  base,
+					"raw":            string(body),
+				})
+			}
+			return
+		}
+
 		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"status":    "starting",
-			"hindsight": false,
-			"message":   "Hindsight is still initializing...",
+			"status":         "unhealthy",
+			"hindsight":      false,
+			"hindsight_url":  base,
+			"code":           resp.StatusCode,
+			"body":           string(body),
 		})
 		return
 	}
-	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
-
-	w.Header().Set("Content-Type", "application/json")
-	if resp.StatusCode == http.StatusOK {
-		var healthData interface{}
-		if json.Unmarshal(body, &healthData) == nil {
-			writeJSON(w, http.StatusOK, map[string]interface{}{
-				"status":    "running",
-				"hindsight": true,
-				"details":   healthData,
-			})
-		} else {
-			writeJSON(w, http.StatusOK, map[string]interface{}{
-				"status":    "running",
-				"hindsight": true,
-				"raw":       string(body),
-			})
-		}
-	} else {
-		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"status":    "unhealthy",
-			"hindsight": false,
-			"code":      resp.StatusCode,
-		})
+	// None of the URLs responded
+	resetHindsightBase()
+	errMsg := "connection refused"
+	if lastErr != nil {
+		errMsg = lastErr.Error()
 	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"status":      "starting",
+		"hindsight":   false,
+		"message":     fmt.Sprintf("Hindsight is not reachable. Tried: %s", strings.Join(triedURLs, ", ")),
+		"last_error":  errMsg,
+	})
 }
 
 func handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -137,18 +219,22 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	base := getHindsightBase()
 	status := map[string]interface{}{
-		"mcp_endpoint": "http://localhost:8888/mcp/{bank_id}/",
-		"api_endpoint": "http://localhost:8888",
-		"ui_endpoint":  "http://localhost:9999",
+		"mcp_endpoint":  "http://localhost:8888/mcp/{bank_id}/",
+		"api_endpoint":  "http://localhost:8888",
+		"ui_endpoint":   "http://localhost:9999",
+		"hindsight_url": base,
 	}
 
 	// Try to get banks to count memories
 	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get(hindsightBase + "/api/v1/banks")
+	resp, err := client.Get(base + "/api/v1/banks")
 	if err != nil {
+		resetHindsightBase()
 		status["hindsight_ready"] = false
 		status["banks"] = 0
+		status["error"] = err.Error()
 		writeJSON(w, http.StatusOK, status)
 		return
 	}
