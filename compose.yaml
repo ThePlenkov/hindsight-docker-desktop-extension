@@ -2,10 +2,17 @@ services:
   api:
     image: ${DESKTOP_PLUGIN_IMAGE}
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
+      - agent-memory-config:/data
 
   hindsight:
     image: ghcr.io/vectorize-io/hindsight:latest
+    depends_on:
+      - api
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        [ -f /config/hindsight.env ] && . /config/hindsight.env
+        exec /app/start-all.sh
     ports:
       - "8888:8888"
       - "9999:9999"
@@ -20,6 +27,12 @@ services:
       - HINDSIGHT_API_LAZY_RERANKER=true
     volumes:
       - hindsight-data:/home/hindsight/.pg0
+      - agent-memory-config:/config:ro
 
 volumes:
   hindsight-data:
+    name: agent-memory-hindsight-data
+    external: true
+  agent-memory-config:
+    name: agent-memory-config
+    external: true

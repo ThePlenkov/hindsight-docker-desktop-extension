@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -88,6 +89,7 @@ func main() {
 	mux.HandleFunc("/retain", handleRetain)
 	mux.HandleFunc("/recall", handleRecall)
 	mux.HandleFunc("/config", handleConfig)
+	mux.HandleFunc("/restart", handleRestart)
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		log.Printf(">> %s %s", r.Method, r.URL.Path)
@@ -102,6 +104,18 @@ func main() {
 			log.Fatalf("server error: %v", err)
 		}
 	}()
+
+	// Config is loaded by the Hindsight entrypoint wrapper from the shared
+	// /config volume at container startup. Generate the env file from any
+	// existing config so Hindsight picks it up.
+	cfg := loadConfig()
+	if cfg.LLMProvider != "" && cfg.LLMProvider != "none" {
+		if err := writeEnvFile(cfg); err != nil {
+			log.Printf("WARNING: failed to write env file: %v", err)
+		} else {
+			log.Printf("wrote hindsight.env: provider=%s model=%s", cfg.LLMProvider, cfg.LLMModel)
+		}
+	}
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -229,7 +243,7 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	// Try to get banks to count memories
 	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get(base + "/api/v1/banks")
+	resp, err := client.Get(base + "/v1/default/banks")
 	if err != nil {
 		resetHindsightBase()
 		status["hindsight_ready"] = false
@@ -241,11 +255,17 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
-	var banks []interface{}
-	if json.Unmarshal(body, &banks) == nil {
-		status["hindsight_ready"] = true
-		status["bank_count"] = len(banks)
-		status["banks"] = banks
+	// Hindsight returns {"banks": [...]}
+	var wrapped map[string]interface{}
+	if json.Unmarshal(body, &wrapped) == nil {
+		if banksList, ok := wrapped["banks"].([]interface{}); ok {
+			status["hindsight_ready"] = true
+			status["bank_count"] = len(banksList)
+			status["banks"] = banksList
+		} else {
+			status["hindsight_ready"] = true
+			status["bank_count"] = 0
+		}
 	} else {
 		status["hindsight_ready"] = true
 		status["banks_raw"] = string(body)
@@ -257,9 +277,52 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 func handleBanks(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		proxyToHindsight(w, "GET", "/api/v1/banks", nil)
+		// Hindsight returns {"banks": [...]}, unwrap to a plain array for the UI
+		base := getHindsightBase()
+		client := &http.Client{Timeout: 30 * time.Second}
+		resp, err := client.Get(base + "/v1/default/banks")
+		if err != nil {
+			resetHindsightBase()
+			writeJSON(w, http.StatusBadGateway, map[string]string{
+				"error":   fmt.Sprintf("hindsight unreachable at %s: %v", base, err),
+				"details": "Hindsight may still be starting up.",
+			})
+			return
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+
+		var wrapped map[string]json.RawMessage
+		if json.Unmarshal(body, &wrapped) == nil {
+			if banksRaw, ok := wrapped["banks"]; ok {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				w.Write(banksRaw)
+				return
+			}
+		}
+		// Fallback: pass through as-is
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(resp.StatusCode)
+		w.Write(body)
 	case http.MethodPost:
-		proxyToHindsight(w, "POST", "/api/v1/banks", r.Body)
+		// Hindsight creates banks via PUT /v1/default/banks/{bank_id}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to read body"})
+			return
+		}
+		var req map[string]interface{}
+		if err := json.Unmarshal(body, &req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+			return
+		}
+		bankID, ok := req["id"].(string)
+		if !ok || bankID == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "id is required"})
+			return
+		}
+		proxyToHindsight(w, "PUT", "/v1/default/banks/"+bankID, strings.NewReader(string(body)))
 	default:
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 	}
@@ -281,20 +344,20 @@ func handleBankByID(w http.ResponseWriter, r *http.Request) {
 		subRoute := parts[1]
 		switch subRoute {
 		case "retain":
-			proxyToHindsight(w, "POST", "/api/v1/banks/"+bankID+"/retain", r.Body)
+			proxyToHindsight(w, "POST", "/v1/default/banks/"+bankID+"/memories", r.Body)
 		case "recall":
-			proxyToHindsight(w, "POST", "/api/v1/banks/"+bankID+"/recall", r.Body)
+			proxyToHindsight(w, "POST", "/v1/default/banks/"+bankID+"/memories/recall", r.Body)
 		default:
-			proxyToHindsight(w, r.Method, "/api/v1/banks/"+bankID+"/"+subRoute, r.Body)
+			proxyToHindsight(w, r.Method, "/v1/default/banks/"+bankID+"/"+subRoute, r.Body)
 		}
 		return
 	}
 
 	switch r.Method {
 	case http.MethodGet:
-		proxyToHindsight(w, "GET", "/api/v1/banks/"+bankID, nil)
+		proxyToHindsight(w, "GET", "/v1/default/banks/"+bankID, nil)
 	case http.MethodDelete:
-		proxyToHindsight(w, "DELETE", "/api/v1/banks/"+bankID, nil)
+		proxyToHindsight(w, "DELETE", "/v1/default/banks/"+bankID, nil)
 	default:
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 	}
@@ -325,7 +388,7 @@ func handleRetain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	proxyToHindsight(w, "POST", "/api/v1/banks/"+bankID+"/retain", strings.NewReader(string(body)))
+	proxyToHindsight(w, "POST", "/v1/default/banks/"+bankID+"/memories", strings.NewReader(string(body)))
 }
 
 func handleRecall(w http.ResponseWriter, r *http.Request) {
@@ -352,29 +415,185 @@ func handleRecall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	proxyToHindsight(w, "POST", "/api/v1/banks/"+bankID+"/recall", strings.NewReader(string(body)))
+	proxyToHindsight(w, "POST", "/v1/default/banks/"+bankID+"/memories/recall", strings.NewReader(string(body)))
+}
+
+// configPath is the persistent config file location (must be on a volume).
+const configPath = "/data/config.json"
+
+// llmConfig holds the LLM configuration fields.
+type llmConfig struct {
+	LLMProvider        string `json:"llm_provider"`
+	LLMModel           string `json:"llm_model"`
+	LLMBaseURL         string `json:"llm_base_url"`
+	LLMMaxConcurrent   string `json:"llm_max_concurrent"`
+	EnableObservations string `json:"enable_observations"`
+	LLMAPIKey          string `json:"llm_api_key,omitempty"`
+}
+
+// loadConfig reads persisted config from disk, falling back to env vars.
+func loadConfig() llmConfig {
+	cfg := llmConfig{
+		LLMProvider:        getEnvDefault("LLM_PROVIDER", "none"),
+		LLMModel:           getEnvDefault("LLM_MODEL", ""),
+		LLMBaseURL:         getEnvDefault("LLM_BASE_URL", ""),
+		LLMMaxConcurrent:   getEnvDefault("LLM_MAX_CONCURRENT", "1"),
+		EnableObservations:  getEnvDefault("ENABLE_OBSERVATIONS", "false"),
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return cfg
+	}
+	var saved llmConfig
+	if json.Unmarshal(data, &saved) == nil {
+		if saved.LLMProvider != "" {
+			cfg.LLMProvider = saved.LLMProvider
+		}
+		if saved.LLMModel != "" {
+			cfg.LLMModel = saved.LLMModel
+		}
+		if saved.LLMBaseURL != "" {
+			cfg.LLMBaseURL = saved.LLMBaseURL
+		}
+		if saved.LLMMaxConcurrent != "" {
+			cfg.LLMMaxConcurrent = saved.LLMMaxConcurrent
+		}
+		if saved.EnableObservations != "" {
+			cfg.EnableObservations = saved.EnableObservations
+		}
+		if saved.LLMAPIKey != "" {
+			cfg.LLMAPIKey = saved.LLMAPIKey
+		}
+	}
+	// Map legacy provider names to valid Hindsight providers
+	if cfg.LLMProvider == "openai-compatible" {
+		cfg.LLMProvider = "openai"
+	}
+	return cfg
+}
+
+// saveConfig writes config to the persistent JSON file and generates
+// the shell env file that Hindsight's entrypoint sources on startup.
+func saveConfig(cfg llmConfig) error {
+	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
+		return fmt.Errorf("mkdir: %w", err)
+	}
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal: %w", err)
+	}
+	if err := os.WriteFile(configPath, data, 0644); err != nil {
+		return err
+	}
+	return writeEnvFile(cfg)
+}
+
+// envFilePath is the shell-sourceable env file read by the Hindsight entrypoint.
+const envFilePath = "/data/hindsight.env"
+
+// writeEnvFile writes a shell-sourceable file with Hindsight env vars.
+func writeEnvFile(cfg llmConfig) error {
+	var lines []string
+	set := func(k, v string) {
+		if v != "" {
+			lines = append(lines, fmt.Sprintf("export %s=\"%s\"", k, v))
+		}
+	}
+	if cfg.LLMProvider != "" && cfg.LLMProvider != "none" {
+		set("HINDSIGHT_API_LLM_PROVIDER", cfg.LLMProvider)
+		set("HINDSIGHT_API_LLM_MODEL", cfg.LLMModel)
+		set("HINDSIGHT_API_LLM_BASE_URL", cfg.LLMBaseURL)
+		set("HINDSIGHT_API_LLM_MAX_CONCURRENT", cfg.LLMMaxConcurrent)
+		set("HINDSIGHT_API_ENABLE_OBSERVATIONS", cfg.EnableObservations)
+		set("HINDSIGHT_API_LLM_API_KEY", cfg.LLMAPIKey)
+	}
+	content := strings.Join(lines, "\n") + "\n"
+	log.Printf("writing env file to %s (%d vars)", envFilePath, len(lines))
+	return os.WriteFile(envFilePath, []byte(content), 0644)
 }
 
 func handleConfig(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		config := map[string]string{
-			"llm_provider":       getEnvDefault("LLM_PROVIDER", "none"),
-			"llm_model":          getEnvDefault("LLM_MODEL", ""),
-			"llm_base_url":       getEnvDefault("LLM_BASE_URL", ""),
-			"llm_max_concurrent": getEnvDefault("LLM_MAX_CONCURRENT", "1"),
-			"enable_observations": getEnvDefault("ENABLE_OBSERVATIONS", "false"),
-		}
-		writeJSON(w, http.StatusOK, config)
+		cfg := loadConfig()
+		// Never send the API key back to the frontend
+		cfg.LLMAPIKey = ""
+		writeJSON(w, http.StatusOK, cfg)
 	case http.MethodPost:
-		// Config updates require restarting the Hindsight container
-		// The UI should use Docker Desktop SDK to update compose env vars
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to read body"})
+			return
+		}
+		var incoming llmConfig
+		if err := json.Unmarshal(body, &incoming); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+			return
+		}
+
+		// Merge: keep existing API key if not provided
+		existing := loadConfig()
+		if incoming.LLMAPIKey == "" {
+			incoming.LLMAPIKey = existing.LLMAPIKey
+		}
+		if incoming.LLMProvider == "" {
+			incoming.LLMProvider = "none"
+		}
+		// Map legacy provider names to valid Hindsight providers
+		if incoming.LLMProvider == "openai-compatible" {
+			incoming.LLMProvider = "openai"
+		}
+		if incoming.LLMMaxConcurrent == "" {
+			incoming.LLMMaxConcurrent = "1"
+		}
+		if incoming.EnableObservations == "" {
+			incoming.EnableObservations = "false"
+		}
+
+		if err := saveConfig(incoming); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("save config: %v", err)})
+			return
+		}
+		log.Printf("config saved to %s", configPath)
+
 		writeJSON(w, http.StatusOK, map[string]string{
-			"message": "Config updates require restarting the Hindsight service. Use Docker Desktop to update environment variables in the compose file.",
+			"message": "Configuration saved. Disable and re-enable the extension (or restart Docker Desktop) for changes to take effect.",
 		})
 	default:
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 	}
+}
+
+func handleRestart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+
+	log.Println("restart requested — resetting Hindsight connection cache")
+
+	// Reset cached URL so the next health-check re-discovers Hindsight.
+	resetHindsightBase()
+
+	// Give Hindsight a moment, then probe to confirm it's reachable.
+	time.Sleep(2 * time.Second)
+	base := probeHindsight()
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(base + "/health")
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"status":  "unreachable",
+			"message": fmt.Sprintf("Hindsight not reachable at %s: %v", base, err),
+		})
+		return
+	}
+	defer resp.Body.Close()
+
+	writeJSON(w, http.StatusOK, map[string]string{
+		"status":  "ok",
+		"message": fmt.Sprintf("Hindsight is reachable at %s (HTTP %d)", base, resp.StatusCode),
+	})
 }
 
 func writeJSON(w http.ResponseWriter, status int, data interface{}) {

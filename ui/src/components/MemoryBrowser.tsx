@@ -30,7 +30,8 @@ interface MemoryBrowserProps {
 }
 
 interface Bank {
-  id: string;
+  bank_id: string;
+  name?: string;
   mission?: string;
   directives?: string[];
   memory_count?: number;
@@ -163,20 +164,20 @@ export default function MemoryBrowser({ ddClient }: MemoryBrowserProps) {
               <List dense>
                 {banks.map((bank) => (
                   <ListItem
-                    key={bank.id}
-                    onClick={() => setSelectedBank(bank.id)}
+                    key={bank.bank_id}
+                    onClick={() => setSelectedBank(bank.bank_id)}
                     sx={{
                       cursor: "pointer",
                       borderRadius: 1,
                       bgcolor:
-                        selectedBank === bank.id
+                        selectedBank === bank.bank_id
                           ? "action.selected"
                           : "transparent",
                       "&:hover": { bgcolor: "action.hover" },
                     }}
                   >
                     <ListItemText
-                      primary={bank.id}
+                      primary={bank.bank_id}
                       secondary={bank.mission || "No mission set"}
                     />
                   </ListItem>

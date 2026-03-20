@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import {
   Alert,
   Box,
+  Button,
   Card,
   CardContent,
   Chip,
@@ -21,6 +22,8 @@ import MemoryIcon from "@mui/icons-material/Memory";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import ExpandLessIcon from "@mui/icons-material/ExpandLess";
 import RefreshIcon from "@mui/icons-material/Refresh";
+import OpenInNewIcon from "@mui/icons-material/OpenInNew";
+import RestartAltIcon from "@mui/icons-material/RestartAlt";
 
 interface StatusPanelProps {
   ddClient: any;
@@ -52,6 +55,8 @@ export default function StatusPanel({ ddClient }: StatusPanelProps) {
   const [status, setStatus] = useState<AppStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const [restarting, setRestarting] = useState(false);
+  const [restartMsg, setRestartMsg] = useState<{ type: "success" | "error"; text: string } | null>(null);
 
   const fetchData = async () => {
     try {
@@ -72,6 +77,23 @@ export default function StatusPanel({ ddClient }: StatusPanelProps) {
       // Backend may not be ready
     }
     setLoading(false);
+  };
+
+  const handleRestart = async () => {
+    setRestarting(true);
+    setRestartMsg(null);
+    try {
+      const res = await ddClient.extension.vm?.service?.post("/restart");
+      if (res?.status === "ok") {
+        setRestartMsg({ type: "success", text: res.message });
+        fetchData();
+      } else {
+        setRestartMsg({ type: "error", text: res?.message || "Hindsight is not reachable" });
+      }
+    } catch (e: any) {
+      setRestartMsg({ type: "error", text: e?.message || "Failed to reach backend" });
+    }
+    setRestarting(false);
   };
 
   useEffect(() => {
@@ -172,6 +194,37 @@ export default function StatusPanel({ ddClient }: StatusPanelProps) {
               </Typography>
             </CardContent>
           </Card>
+        </Grid>
+
+        <Grid item xs={12}>
+          <Box display="flex" gap={2} alignItems="center" flexWrap="wrap">
+            <Button
+              variant="outlined"
+              startIcon={<OpenInNewIcon />}
+              disabled={!isRunning}
+              onClick={() =>
+                ddClient.host.openExternal(
+                  status?.ui_endpoint ?? "http://localhost:9999"
+                )
+              }
+            >
+              Open Hindsight UI
+            </Button>
+            <Button
+              variant="outlined"
+              color="warning"
+              startIcon={restarting ? <CircularProgress size={18} color="inherit" /> : <RestartAltIcon />}
+              disabled={restarting}
+              onClick={handleRestart}
+            >
+              {restarting ? "Checking..." : "Check Hindsight Connection"}
+            </Button>
+          </Box>
+          {restartMsg && (
+            <Alert severity={restartMsg.type} sx={{ mt: 1 }} onClose={() => setRestartMsg(null)}>
+              {restartMsg.text}
+            </Alert>
+          )}
         </Grid>
       </Grid>
 

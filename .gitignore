@@ -6,3 +6,5 @@ ui/node_modules/
 .DS_Store
 .env
 bun.lockb
+bun.lock
+package-lock.json

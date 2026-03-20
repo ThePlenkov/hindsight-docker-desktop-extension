@@ -1,8 +1,9 @@
 # Stage 1: Build React UI
 FROM oven/bun:1-alpine AS ui-builder
 ARG BUN_CONFIG_REGISTRY
+ENV BUN_CONFIG_REGISTRY=${BUN_CONFIG_REGISTRY}
 WORKDIR /ui
-COPY ui/package.json ui/bun.lockb* ./
+COPY ui/package.json ui/bun.lock* ./
 RUN bun install
 COPY ui/ .
 RUN bun run build

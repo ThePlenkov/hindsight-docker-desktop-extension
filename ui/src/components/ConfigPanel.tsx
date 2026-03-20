@@ -5,6 +5,7 @@ import {
   Button,
   Card,
   CardContent,
+  CircularProgress,
   FormControl,
   FormControlLabel,
   Grid,
@@ -35,9 +36,12 @@ interface Config {
 const LLM_PROVIDERS = [
   { value: "none", label: "None (offline mode)" },
   { value: "ollama", label: "Ollama (local)" },
-  { value: "openai", label: "OpenAI" },
+  { value: "lmstudio", label: "LM Studio (local)" },
+  { value: "openai", label: "OpenAI / OpenAI-compatible" },
   { value: "anthropic", label: "Anthropic" },
-  { value: "openai-compatible", label: "OpenAI-compatible" },
+  { value: "groq", label: "Groq" },
+  { value: "gemini", label: "Google Gemini" },
+  { value: "mock", label: "Mock (testing)" },
 ];
 
 export default function ConfigPanel({ ddClient }: ConfigPanelProps) {
@@ -49,6 +53,8 @@ export default function ConfigPanel({ ddClient }: ConfigPanelProps) {
     enable_observations: "false",
   });
   const [saved, setSaved] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState("");
   const [apiKey, setApiKey] = useState("");
 
   useEffect(() => {
@@ -66,21 +72,26 @@ export default function ConfigPanel({ ddClient }: ConfigPanelProps) {
   }, []);
 
   const handleSave = async () => {
+    setSaving(true);
+    setSaved(false);
+    setSaveError("");
     try {
       await ddClient.extension.vm?.service?.post("/config", {
         ...config,
         llm_api_key: apiKey || undefined,
       });
       setSaved(true);
-      setTimeout(() => setSaved(false), 3000);
-    } catch {
-      // Handle error
+      setApiKey("");
+      setTimeout(() => setSaved(false), 10000);
+    } catch (e: any) {
+      setSaveError(e?.message || "Failed to save configuration");
     }
+    setSaving(false);
   };
 
-  const needsApiKey = config.llm_provider !== "none" && config.llm_provider !== "ollama";
+  const needsApiKey = config.llm_provider !== "none" && config.llm_provider !== "ollama" && config.llm_provider !== "lmstudio" && config.llm_provider !== "mock";
   const needsBaseUrl =
-    config.llm_provider === "ollama" || config.llm_provider === "openai-compatible";
+    config.llm_provider === "ollama" || config.llm_provider === "openai" || config.llm_provider === "lmstudio";
 
   return (
     <Box>
@@ -138,7 +149,7 @@ export default function ConfigPanel({ ddClient }: ConfigPanelProps) {
                     setConfig({ ...config, llm_base_url: e.target.value })
                   }
                   sx={{ mb: 2 }}
-                  helperText='e.g., "http://host.docker.internal:11434" for Ollama'
+                  helperText='Use host.docker.internal instead of localhost, e.g., "http://host.docker.internal:11434" for Ollama, "http://host.docker.internal:4000" for LiteLLM'
                 />
               )}
 
@@ -187,14 +198,21 @@ export default function ConfigPanel({ ddClient }: ConfigPanelProps) {
               <Box sx={{ mt: 3 }}>
                 <Button
                   variant="contained"
-                  startIcon={<SaveIcon />}
+                  startIcon={saving ? <CircularProgress size={18} color="inherit" /> : <SaveIcon />}
                   onClick={handleSave}
+                  disabled={saving}
                 >
-                  Save Configuration
+                  {saving ? "Saving..." : "Save Configuration"}
                 </Button>
                 {saved && (
                   <Alert severity="success" sx={{ mt: 1 }}>
-                    Configuration saved. Restart the Hindsight service to apply changes.
+                    Configuration saved. To apply changes, disable and re-enable the
+                    extension in Docker Desktop (Extensions tab), or restart Docker Desktop.
+                  </Alert>
+                )}
+                {saveError && (
+                  <Alert severity="error" sx={{ mt: 1 }} onClose={() => setSaveError("")}>
+                    {saveError}
                   </Alert>
                 )}
               </Box>
