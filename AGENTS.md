@@ -33,10 +33,10 @@
 ## LLM Configuration
 
 - **LiteLLM proxy** runs as a separate DD extension at `http://host.docker.internal:4000`.
-- LiteLLM config is on Docker volume `pplenkov_litellm-dd-ext-desktop-extension_litellm-config` at `/data/config.yaml`.
-- **Bedrock-backed Claude models do NOT support `response_format: json_object`** — the upstream returns 422. Use OpenAI-native models (e.g., `gpt-5-mini`) or Gemini models instead.
-- LiteLLM's `additional_drop_params` can't selectively drop `json_object` while keeping `json_schema`. Switching models is the correct fix.
-- Current working model: `gpt-5-mini` via `kilocode:12` backend.
+- LiteLLM config is on Docker volume `litellm-ext-config` at `/data/config.yaml`. Secrets at `/data/secrets/{master_key,api_key,base_url}`.
+- **Bedrock-backed Claude models do NOT support `response_format: json_object`** — the upstream returns 422. Use OpenAI-native models or Gemini models instead.
+- **Do NOT use reasoning models (gpt-5-mini, gpt-5_4) for Hindsight.** They spend completion tokens on internal chain-of-thought and return empty content with small `max_tokens`. Use `gpt-4o-mini` (non-reasoning) instead.
+- Current working model for Hindsight: `gpt-4o-mini` via `kilocode:12` backend.
 
 ## Verification
 
