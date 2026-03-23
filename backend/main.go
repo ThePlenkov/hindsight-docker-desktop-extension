@@ -88,6 +88,7 @@ func main() {
 	mux.HandleFunc("/banks/", handleBankByID)
 	mux.HandleFunc("/retain", handleRetain)
 	mux.HandleFunc("/recall", handleRecall)
+	mux.HandleFunc("/reflect", handleReflect)
 	mux.HandleFunc("/config", handleConfig)
 	mux.HandleFunc("/restart", handleRestart)
 
@@ -129,6 +130,11 @@ func main() {
 
 // proxyToHindsight forwards a request to the Hindsight API and writes the response back.
 func proxyToHindsight(w http.ResponseWriter, method, path string, body io.Reader) {
+	proxyToHindsightWithTimeout(w, method, path, body, 30*time.Second)
+}
+
+// proxyToHindsightWithTimeout is like proxyToHindsight but with a configurable timeout.
+func proxyToHindsightWithTimeout(w http.ResponseWriter, method, path string, body io.Reader, timeout time.Duration) {
 	base := getHindsightBase()
 	url := base + path
 	req, err := http.NewRequest(method, url, body)
@@ -138,7 +144,7 @@ func proxyToHindsight(w http.ResponseWriter, method, path string, body io.Reader
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := &http.Client{Timeout: timeout}
 	resp, err := client.Do(req)
 	if err != nil {
 		// Clear cache so next request re-probes
@@ -347,6 +353,8 @@ func handleBankByID(w http.ResponseWriter, r *http.Request) {
 			proxyToHindsight(w, "POST", "/v1/default/banks/"+bankID+"/memories", r.Body)
 		case "recall":
 			proxyToHindsight(w, "POST", "/v1/default/banks/"+bankID+"/memories/recall", r.Body)
+		case "reflect":
+			proxyToHindsightWithTimeout(w, "POST", "/v1/default/banks/"+bankID+"/reflect", r.Body, 120*time.Second)
 		default:
 			proxyToHindsight(w, r.Method, "/v1/default/banks/"+bankID+"/"+subRoute, r.Body)
 		}
@@ -416,6 +424,33 @@ func handleRecall(w http.ResponseWriter, r *http.Request) {
 	}
 
 	proxyToHindsight(w, "POST", "/v1/default/banks/"+bankID+"/memories/recall", strings.NewReader(string(body)))
+}
+
+func handleReflect(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+
+	var req map[string]interface{}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to read body"})
+		return
+	}
+
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+
+	bankID, ok := req["bank_id"].(string)
+	if !ok || bankID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bank_id is required"})
+		return
+	}
+
+	proxyToHindsightWithTimeout(w, "POST", "/v1/default/banks/"+bankID+"/reflect", strings.NewReader(string(body)), 120*time.Second)
 }
 
 // configPath is the persistent config file location (must be on a volume).

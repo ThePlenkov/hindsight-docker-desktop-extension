@@ -10,6 +10,7 @@ import {
 import StatusPanel from "./components/StatusPanel";
 import ConfigPanel from "./components/ConfigPanel";
 import MemoryBrowser from "./components/MemoryBrowser";
+import ReflectPanel from "./components/ReflectPanel";
 
 const ddClient = createDockerDesktopClient();
 
@@ -44,6 +45,7 @@ export default function App() {
         <Tabs value={tab} onChange={(_, v) => setTab(v)}>
           <Tab label="Status" />
           <Tab label="Memory Banks" />
+          <Tab label="Reflect" />
           <Tab label="Settings" />
         </Tabs>
       </Box>
@@ -55,6 +57,9 @@ export default function App() {
         <MemoryBrowser ddClient={ddClient} />
       </TabPanel>
       <TabPanel value={tab} index={2}>
+        <ReflectPanel ddClient={ddClient} />
+      </TabPanel>
+      <TabPanel value={tab} index={3}>
         <ConfigPanel ddClient={ddClient} />
       </TabPanel>
     </Container>
