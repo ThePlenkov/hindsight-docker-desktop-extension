@@ -7,6 +7,7 @@ import {
   CardContent,
   Chip,
   CircularProgress,
+  Collapse,
   Dialog,
   DialogActions,
   DialogContent,
@@ -17,13 +18,17 @@ import {
   ListItem,
   ListItemText,
   Paper,
+  Snackbar,
   TextField,
   Typography,
 } from "@mui/material";
 import AddIcon from "@mui/icons-material/Add";
 import SearchIcon from "@mui/icons-material/Search";
 import RefreshIcon from "@mui/icons-material/Refresh";
+import SaveIcon from "@mui/icons-material/Save";
 import AccountTreeIcon from "@mui/icons-material/AccountTree";
+import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
+import ExpandLessIcon from "@mui/icons-material/ExpandLess";
 
 interface MemoryBrowserProps {
   ddClient: any;
@@ -54,6 +59,14 @@ export default function MemoryBrowser({ ddClient }: MemoryBrowserProps) {
   const [createOpen, setCreateOpen] = useState(false);
   const [newBankId, setNewBankId] = useState("");
   const [newBankMission, setNewBankMission] = useState("");
+
+  // Retain state
+  const [retainContent, setRetainContent] = useState("");
+  const [retainContext, setRetainContext] = useState("");
+  const [retainTags, setRetainTags] = useState("");
+  const [retaining, setRetaining] = useState(false);
+  const [retainSuccess, setRetainSuccess] = useState(false);
+  const [retainOpen, setRetainOpen] = useState(true);
 
   const fetchBanks = async () => {
     setLoading(true);
@@ -89,6 +102,42 @@ export default function MemoryBrowser({ ddClient }: MemoryBrowserProps) {
     } catch (e: any) {
       setError("Failed to create bank: " + (e.message || String(e)));
     }
+  };
+
+  const handleRetain = async () => {
+    if (!selectedBank || !retainContent.trim()) return;
+    setRetaining(true);
+    setError("");
+    try {
+      const body: any = {
+        bank_id: selectedBank,
+        content: retainContent.trim(),
+      };
+      if (retainContext.trim()) {
+        body.context = retainContext.trim();
+      }
+      if (retainTags.trim()) {
+        body.tags = retainTags
+          .split(",")
+          .map((t) => t.trim())
+          .filter(Boolean);
+      }
+      const res = await ddClient.extension.vm?.service?.post("/retain", body);
+      if (res?.error) {
+        setError(
+          "Retain failed: " +
+            (typeof res.error === "string" ? res.error : JSON.stringify(res.error))
+        );
+      } else {
+        setRetainContent("");
+        setRetainContext("");
+        setRetainTags("");
+        setRetainSuccess(true);
+      }
+    } catch (e: any) {
+      setError("Retain failed: " + (e.message || String(e)));
+    }
+    setRetaining(false);
   };
 
   const handleSearch = async () => {
@@ -203,6 +252,73 @@ export default function MemoryBrowser({ ddClient }: MemoryBrowserProps) {
                 </CardContent>
               </Card>
 
+              {/* Retain / Store Memory */}
+              <Paper sx={{ p: 2, mb: 2 }}>
+                <Box
+                  display="flex"
+                  justifyContent="space-between"
+                  alignItems="center"
+                  sx={{ cursor: "pointer" }}
+                  onClick={() => setRetainOpen(!retainOpen)}
+                >
+                  <Typography variant="subtitle2">Store Memory</Typography>
+                  <IconButton size="small">
+                    {retainOpen ? (
+                      <ExpandLessIcon fontSize="small" />
+                    ) : (
+                      <ExpandMoreIcon fontSize="small" />
+                    )}
+                  </IconButton>
+                </Box>
+                <Collapse in={retainOpen}>
+                  <TextField
+                    fullWidth
+                    multiline
+                    minRows={3}
+                    maxRows={10}
+                    size="small"
+                    placeholder="Type or paste content to remember..."
+                    value={retainContent}
+                    onChange={(e) => setRetainContent(e.target.value)}
+                    sx={{ mt: 1 }}
+                  />
+                  <Box display="flex" gap={1} mt={1}>
+                    <TextField
+                      size="small"
+                      placeholder="Context (optional)"
+                      value={retainContext}
+                      onChange={(e) => setRetainContext(e.target.value)}
+                      sx={{ flex: 1 }}
+                    />
+                    <TextField
+                      size="small"
+                      placeholder="Tags (comma-separated)"
+                      value={retainTags}
+                      onChange={(e) => setRetainTags(e.target.value)}
+                      sx={{ flex: 1 }}
+                    />
+                  </Box>
+                  <Box display="flex" justifyContent="flex-end" mt={1}>
+                    <Button
+                      variant="contained"
+                      size="small"
+                      startIcon={
+                        retaining ? (
+                          <CircularProgress size={16} color="inherit" />
+                        ) : (
+                          <SaveIcon />
+                        )
+                      }
+                      onClick={handleRetain}
+                      disabled={retaining || !retainContent.trim()}
+                    >
+                      {retaining ? "Storing..." : "Retain"}
+                    </Button>
+                  </Box>
+                </Collapse>
+              </Paper>
+
+              {/* Recall / Search Memories */}
               <Paper sx={{ p: 2 }}>
                 <Typography variant="subtitle2" gutterBottom>
                   Search Memories
@@ -263,6 +379,7 @@ export default function MemoryBrowser({ ddClient }: MemoryBrowserProps) {
         </Grid>
       </Grid>
 
+      {/* Create Bank Dialog */}
       <Dialog open={createOpen} onClose={() => setCreateOpen(false)} maxWidth="sm" fullWidth>
         <DialogTitle>Create Memory Bank</DialogTitle>
         <DialogContent>
@@ -293,6 +410,14 @@ export default function MemoryBrowser({ ddClient }: MemoryBrowserProps) {
           </Button>
         </DialogActions>
       </Dialog>
+
+      {/* Retain success snackbar */}
+      <Snackbar
+        open={retainSuccess}
+        autoHideDuration={3000}
+        onClose={() => setRetainSuccess(false)}
+        message="Memory stored successfully"
+      />
     </Box>
   );
 }
