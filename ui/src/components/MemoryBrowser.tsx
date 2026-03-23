@@ -123,10 +123,11 @@ export default function MemoryBrowser({ ddClient }: MemoryBrowserProps) {
           .filter(Boolean);
       }
       const res = await ddClient.extension.vm?.service?.post("/retain", body);
-      if (res?.error) {
+      if (res?.error || res?.detail) {
+        const errMsg = res?.error || res?.detail;
         setError(
           "Retain failed: " +
-            (typeof res.error === "string" ? res.error : JSON.stringify(res.error))
+            (typeof errMsg === "string" ? errMsg : JSON.stringify(errMsg))
         );
       } else {
         setRetainContent("");

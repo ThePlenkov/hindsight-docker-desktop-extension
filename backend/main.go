@@ -396,7 +396,34 @@ func handleRetain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	proxyToHindsight(w, "POST", "/v1/default/banks/"+bankID+"/memories", strings.NewReader(string(body)))
+	// Build a MemoryItem from the flat request fields
+	item := map[string]interface{}{
+		"content": req["content"],
+	}
+	if v, ok := req["context"]; ok {
+		item["context"] = v
+	}
+	if v, ok := req["tags"]; ok {
+		item["tags"] = v
+	}
+	if v, ok := req["metadata"]; ok {
+		item["metadata"] = v
+	}
+	if v, ok := req["timestamp"]; ok {
+		item["timestamp"] = v
+	}
+
+	// Wrap into the Hindsight RetainRequest format: { items: [...] }
+	retainReq := map[string]interface{}{
+		"items": []interface{}{item},
+	}
+	retainBody, err := json.Marshal(retainReq)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to build retain request"})
+		return
+	}
+
+	proxyToHindsight(w, "POST", "/v1/default/banks/"+bankID+"/memories", strings.NewReader(string(retainBody)))
 }
 
 func handleRecall(w http.ResponseWriter, r *http.Request) {
