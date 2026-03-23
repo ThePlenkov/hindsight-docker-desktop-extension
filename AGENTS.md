@@ -2,7 +2,7 @@
 
 ## Build
 
-- **Docker build requires corporate registry**: Pass `BUN_CONFIG_REGISTRY=<your-registry-url>` as a build arg. Without it, bun install fails with `UNKNOWN_CERTIFICATE_VERIFICATION_ERROR` inside the Docker VM.
+- **Docker build may require a custom npm registry**: If your network intercepts TLS, pass `BUN_CONFIG_REGISTRY=<your-registry-url>` as a build arg to avoid `UNKNOWN_CERTIFICATE_VERIFICATION_ERROR` inside the Docker VM.
   ```
   docker build --build-arg BUN_CONFIG_REGISTRY=<your-registry-url> -t pplenkov/agent-memory:latest .
   ```
@@ -41,8 +41,8 @@
 ## Verification
 
 ```bash
-# Build the extension
-docker build --build-arg BUN_CONFIG_REGISTRY=<your-registry-url> -t pplenkov/agent-memory:latest .
+# Build the extension (add --build-arg BUN_CONFIG_REGISTRY=<url> if needed)
+docker build -t pplenkov/agent-memory:latest .
 
 # Update (restart) the extension
 docker extension update pplenkov/agent-memory:latest --force
@@ -57,3 +57,9 @@ sleep 5
 curl -s http://localhost:8888/mcp/default/ -X POST -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"recall","arguments":{"query":"test"}},"id":2}'
 ```
+
+## Security Rules
+
+- **NEVER commit internal/corporate URLs, hostnames, or registry paths** to this repository. It is public on GitHub. Use placeholders like `<your-registry-url>` instead.
+- Committer email addresses are acceptable (they are already publicly visible in git metadata).
+- When in doubt, use environment variables or local config files (gitignored) for any organization-specific values.
