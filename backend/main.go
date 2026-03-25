@@ -90,6 +90,7 @@ func main() {
 	mux.HandleFunc("/recall", handleRecall)
 	mux.HandleFunc("/reflect", handleReflect)
 	mux.HandleFunc("/config", handleConfig)
+	mux.HandleFunc("/apply-config", handleApplyConfig)
 	mux.HandleFunc("/restart", handleRestart)
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -110,11 +111,14 @@ func main() {
 	// /config volume at container startup. Generate the env file from any
 	// existing config so Hindsight picks it up.
 	cfg := loadConfig()
-	if cfg.LLMProvider != "" && cfg.LLMProvider != "none" {
+	hasLLM := cfg.LLMProvider != "" && cfg.LLMProvider != "none"
+	hasOtel := cfg.OtelTracesEnabled == "true"
+	hasDB := cfg.DatabaseURL != ""
+	if hasLLM || hasOtel || hasDB {
 		if err := writeEnvFile(cfg); err != nil {
 			log.Printf("WARNING: failed to write env file: %v", err)
 		} else {
-			log.Printf("wrote hindsight.env: provider=%s model=%s", cfg.LLMProvider, cfg.LLMModel)
+			log.Printf("wrote hindsight.env: provider=%s model=%s otel=%s", cfg.LLMProvider, cfg.LLMModel, cfg.OtelTracesEnabled)
 		}
 	}
 
@@ -483,7 +487,7 @@ func handleReflect(w http.ResponseWriter, r *http.Request) {
 // configPath is the persistent config file location (must be on a volume).
 const configPath = "/data/config.json"
 
-// llmConfig holds the LLM configuration fields.
+// llmConfig holds the LLM, database, and monitoring configuration fields.
 type llmConfig struct {
 	LLMProvider        string `json:"llm_provider"`
 	LLMModel           string `json:"llm_model"`
@@ -491,6 +495,14 @@ type llmConfig struct {
 	LLMMaxConcurrent   string `json:"llm_max_concurrent"`
 	EnableObservations string `json:"enable_observations"`
 	LLMAPIKey          string `json:"llm_api_key,omitempty"`
+	// Database
+	DatabaseURL        string `json:"database_url,omitempty"`
+	// Monitoring / OpenTelemetry
+	OtelTracesEnabled  string `json:"otel_traces_enabled"`
+	OtelEndpoint       string `json:"otel_endpoint"`
+	OtelHeaders        string `json:"otel_headers"`
+	OtelServiceName    string `json:"otel_service_name"`
+	OtelEnvironment    string `json:"otel_environment"`
 }
 
 // loadConfig reads persisted config from disk, falling back to env vars.
@@ -501,6 +513,12 @@ func loadConfig() llmConfig {
 		LLMBaseURL:         getEnvDefault("LLM_BASE_URL", ""),
 		LLMMaxConcurrent:   getEnvDefault("LLM_MAX_CONCURRENT", "1"),
 		EnableObservations:  getEnvDefault("ENABLE_OBSERVATIONS", "false"),
+		DatabaseURL:         getEnvDefault("DATABASE_URL", ""),
+		OtelTracesEnabled:   getEnvDefault("OTEL_TRACES_ENABLED", "false"),
+		OtelEndpoint:        getEnvDefault("OTEL_ENDPOINT", ""),
+		OtelHeaders:         getEnvDefault("OTEL_HEADERS", ""),
+		OtelServiceName:     getEnvDefault("OTEL_SERVICE_NAME", ""),
+		OtelEnvironment:     getEnvDefault("OTEL_ENVIRONMENT", ""),
 	}
 	data, err := os.ReadFile(configPath)
 	if err != nil {
@@ -525,6 +543,24 @@ func loadConfig() llmConfig {
 		}
 		if saved.LLMAPIKey != "" {
 			cfg.LLMAPIKey = saved.LLMAPIKey
+		}
+		if saved.DatabaseURL != "" {
+			cfg.DatabaseURL = saved.DatabaseURL
+		}
+		if saved.OtelTracesEnabled != "" {
+			cfg.OtelTracesEnabled = saved.OtelTracesEnabled
+		}
+		if saved.OtelEndpoint != "" {
+			cfg.OtelEndpoint = saved.OtelEndpoint
+		}
+		if saved.OtelHeaders != "" {
+			cfg.OtelHeaders = saved.OtelHeaders
+		}
+		if saved.OtelServiceName != "" {
+			cfg.OtelServiceName = saved.OtelServiceName
+		}
+		if saved.OtelEnvironment != "" {
+			cfg.OtelEnvironment = saved.OtelEnvironment
 		}
 	}
 	// Map legacy provider names to valid Hindsight providers
@@ -569,6 +605,18 @@ func writeEnvFile(cfg llmConfig) error {
 		set("HINDSIGHT_API_ENABLE_OBSERVATIONS", cfg.EnableObservations)
 		set("HINDSIGHT_API_LLM_API_KEY", cfg.LLMAPIKey)
 	}
+	// Database — override the compose default if the user configured a custom URL
+	if cfg.DatabaseURL != "" {
+		set("HINDSIGHT_API_DATABASE_URL", cfg.DatabaseURL)
+	}
+	// Monitoring / OpenTelemetry — written regardless of LLM provider
+	if cfg.OtelTracesEnabled == "true" {
+		set("HINDSIGHT_API_OTEL_TRACES_ENABLED", cfg.OtelTracesEnabled)
+		set("HINDSIGHT_API_OTEL_EXPORTER_OTLP_ENDPOINT", cfg.OtelEndpoint)
+		set("HINDSIGHT_API_OTEL_EXPORTER_OTLP_HEADERS", cfg.OtelHeaders)
+		set("HINDSIGHT_API_OTEL_SERVICE_NAME", cfg.OtelServiceName)
+		set("HINDSIGHT_API_OTEL_DEPLOYMENT_ENVIRONMENT", cfg.OtelEnvironment)
+	}
 	content := strings.Join(lines, "\n") + "\n"
 	log.Printf("writing env file to %s (%d vars)", envFilePath, len(lines))
 	return os.WriteFile(envFilePath, []byte(content), 0644)
@@ -580,6 +628,8 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 		cfg := loadConfig()
 		// Never send the API key back to the frontend
 		cfg.LLMAPIKey = ""
+		// Don't send database_url — it may contain credentials; just send whether it's custom
+		cfg.DatabaseURL = ""
 		writeJSON(w, http.StatusOK, cfg)
 	case http.MethodPost:
 		body, err := io.ReadAll(r.Body)
@@ -593,10 +643,13 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Merge: keep existing API key if not provided
+		// Merge: keep existing secrets if not provided
 		existing := loadConfig()
 		if incoming.LLMAPIKey == "" {
 			incoming.LLMAPIKey = existing.LLMAPIKey
+		}
+		if incoming.DatabaseURL == "" {
+			incoming.DatabaseURL = existing.DatabaseURL
 		}
 		if incoming.LLMProvider == "" {
 			incoming.LLMProvider = "none"
@@ -611,6 +664,9 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 		if incoming.EnableObservations == "" {
 			incoming.EnableObservations = "false"
 		}
+		if incoming.OtelTracesEnabled == "" {
+			incoming.OtelTracesEnabled = "false"
+		}
 
 		if err := saveConfig(incoming); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("save config: %v", err)})
@@ -624,6 +680,123 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 	}
+}
+
+// handleApplyConfig pushes the current LLM config to all existing banks
+// via the Hindsight per-bank config PATCH API. This allows runtime config
+// changes without restarting the Hindsight container (which would risk
+// data loss from the embedded Postgres).
+func handleApplyConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+
+	cfg := loadConfig()
+
+	// Build the config override payload using Hindsight's env-var key format
+	overrides := map[string]interface{}{}
+	if cfg.LLMProvider != "" && cfg.LLMProvider != "none" {
+		overrides["HINDSIGHT_API_LLM_PROVIDER"] = cfg.LLMProvider
+		if cfg.LLMModel != "" {
+			overrides["HINDSIGHT_API_LLM_MODEL"] = cfg.LLMModel
+		}
+		if cfg.LLMBaseURL != "" {
+			overrides["HINDSIGHT_API_LLM_BASE_URL"] = cfg.LLMBaseURL
+		}
+		if cfg.LLMAPIKey != "" {
+			overrides["HINDSIGHT_API_LLM_API_KEY"] = cfg.LLMAPIKey
+		}
+		if cfg.LLMMaxConcurrent != "" {
+			overrides["HINDSIGHT_API_LLM_MAX_CONCURRENT"] = cfg.LLMMaxConcurrent
+		}
+	} else {
+		// Provider is "none" — set to mock so Hindsight doesn't require an LLM
+		overrides["HINDSIGHT_API_LLM_PROVIDER"] = "mock"
+	}
+	if cfg.EnableObservations != "" {
+		overrides["HINDSIGHT_API_ENABLE_OBSERVATIONS"] = cfg.EnableObservations
+	}
+
+	// Fetch the list of banks
+	base := getHindsightBase()
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(base + "/v1/default/banks")
+	if err != nil {
+		resetHindsightBase()
+		writeJSON(w, http.StatusBadGateway, map[string]string{
+			"error": fmt.Sprintf("cannot reach Hindsight to list banks: %v", err),
+		})
+		return
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	var wrapped map[string]json.RawMessage
+	var bankIDs []string
+	if json.Unmarshal(body, &wrapped) == nil {
+		if banksRaw, ok := wrapped["banks"]; ok {
+			var banks []map[string]interface{}
+			if json.Unmarshal(banksRaw, &banks) == nil {
+				for _, b := range banks {
+					if id, ok := b["bank_id"].(string); ok {
+						bankIDs = append(bankIDs, id)
+					}
+				}
+			}
+		}
+	}
+
+	patchBody, _ := json.Marshal(map[string]interface{}{"config": overrides})
+
+	var applied []string
+	var errors []string
+	for _, bankID := range bankIDs {
+		req, _ := http.NewRequest("PATCH", base+"/v1/default/banks/"+bankID+"/config", strings.NewReader(string(patchBody)))
+		req.Header.Set("Content-Type", "application/json")
+		pResp, err := client.Do(req)
+		if err != nil {
+			errors = append(errors, fmt.Sprintf("%s: %v", bankID, err))
+			continue
+		}
+		pResp.Body.Close()
+		if pResp.StatusCode >= 200 && pResp.StatusCode < 300 {
+			applied = append(applied, bankID)
+		} else {
+			errors = append(errors, fmt.Sprintf("%s: HTTP %d", bankID, pResp.StatusCode))
+		}
+	}
+
+	result := map[string]interface{}{
+		"applied_to": applied,
+		"bank_count": len(bankIDs),
+	}
+	if len(errors) > 0 {
+		result["errors"] = errors
+	}
+
+	// Note: OTel, database, and some global settings still require a restart to take effect.
+	// We save them to hindsight.env so they'll be picked up on next container start.
+	needsRestart := false
+	if cfg.OtelTracesEnabled == "true" {
+		needsRestart = true
+	}
+	if cfg.DatabaseURL != "" {
+		needsRestart = true
+	}
+	if needsRestart {
+		var parts []string
+		if cfg.OtelTracesEnabled == "true" {
+			parts = append(parts, "OpenTelemetry")
+		}
+		if cfg.DatabaseURL != "" {
+			parts = append(parts, "Database URL")
+		}
+		result["note"] = fmt.Sprintf("%s settings were saved but require an extension restart to take effect. Disable and re-enable the extension in Docker Desktop.", strings.Join(parts, " and "))
+	}
+
+	log.Printf("apply-config: pushed LLM config to %d/%d banks", len(applied), len(bankIDs))
+	writeJSON(w, http.StatusOK, result)
 }
 
 func handleRestart(w http.ResponseWriter, r *http.Request) {

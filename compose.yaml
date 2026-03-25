@@ -4,10 +4,27 @@ services:
     volumes:
       - agent-memory-config:/data
 
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      - POSTGRES_USER=hindsight
+      - POSTGRES_PASSWORD=hindsight
+      - POSTGRES_DB=hindsight
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hindsight -d hindsight"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   hindsight:
     image: ghcr.io/vectorize-io/hindsight:latest
     depends_on:
-      - api
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_started
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
@@ -17,6 +34,7 @@ services:
       - "8888:8888"
       - "9999:9999"
     environment:
+      - HINDSIGHT_API_DATABASE_URL=postgresql://hindsight:hindsight@postgres:5432/hindsight
       - HINDSIGHT_API_LLM_PROVIDER=${LLM_PROVIDER:-mock}
       - HINDSIGHT_API_LLM_MODEL=${LLM_MODEL:-}
       - HINDSIGHT_API_LLM_API_KEY=${LLM_API_KEY:-}
@@ -26,13 +44,11 @@ services:
       - HINDSIGHT_API_SKIP_LLM_VERIFICATION=true
       - HINDSIGHT_API_LAZY_RERANKER=true
     volumes:
-      - hindsight-data:/home/hindsight/.pg0
       - agent-memory-config:/config:ro
 
 volumes:
-  hindsight-data:
-    name: agent-memory-hindsight-data
-    external: true
+  postgres-data:
+    name: agent-memory-postgres-data
   agent-memory-config:
     name: agent-memory-config
     external: true

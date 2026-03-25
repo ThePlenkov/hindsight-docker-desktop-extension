@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import {
   Alert,
   Box,
@@ -6,6 +6,7 @@ import {
   Card,
   CardContent,
   CircularProgress,
+  Collapse,
   FormControl,
   FormControlLabel,
   Grid,
@@ -19,6 +20,8 @@ import {
 } from "@mui/material";
 import SettingsIcon from "@mui/icons-material/Settings";
 import SaveIcon from "@mui/icons-material/Save";
+import MonitorHeartIcon from "@mui/icons-material/MonitorHeart";
+import StorageIcon from "@mui/icons-material/Storage";
 
 interface ConfigPanelProps {
   ddClient: any;
@@ -31,6 +34,14 @@ interface Config {
   llm_max_concurrent: string;
   enable_observations: string;
   llm_api_key?: string;
+  // Database
+  database_url?: string;
+  // Monitoring / OpenTelemetry
+  otel_traces_enabled: string;
+  otel_endpoint: string;
+  otel_headers: string;
+  otel_service_name: string;
+  otel_environment: string;
 }
 
 const LLM_PROVIDERS = [
@@ -51,11 +62,19 @@ export default function ConfigPanel({ ddClient }: ConfigPanelProps) {
     llm_base_url: "",
     llm_max_concurrent: "1",
     enable_observations: "false",
+    otel_traces_enabled: "false",
+    otel_endpoint: "",
+    otel_headers: "",
+    otel_service_name: "",
+    otel_environment: "",
   });
   const [saved, setSaved] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
+  const [saveStatus, setSaveStatus] = useState("");
   const [apiKey, setApiKey] = useState("");
+  const [databaseUrl, setDatabaseUrl] = useState("");
+  const [useCustomDb, setUseCustomDb] = useState(false);
 
   useEffect(() => {
     const fetchConfig = async () => {
@@ -71,19 +90,51 @@ export default function ConfigPanel({ ddClient }: ConfigPanelProps) {
     fetchConfig();
   }, []);
 
+  // Apply LLM config to all existing banks via the Hindsight per-bank config API.
+  // This avoids restarting the Hindsight container, which would risk data loss
+  // from the embedded Postgres.
+  const applyConfig = useCallback(async (): Promise<{ applied: number; note?: string; errors?: string[] }> => {
+    setSaveStatus("Applying configuration to Hindsight...");
+    const res = await ddClient.extension.vm?.service?.post("/apply-config");
+    return {
+      applied: res?.bank_count ?? 0,
+      note: res?.note,
+      errors: res?.errors,
+    };
+  }, [ddClient]);
+
   const handleSave = async () => {
     setSaving(true);
     setSaved(false);
     setSaveError("");
+    setSaveStatus("Saving configuration...");
     try {
       await ddClient.extension.vm?.service?.post("/config", {
         ...config,
         llm_api_key: apiKey || undefined,
+        database_url: useCustomDb ? databaseUrl || undefined : undefined,
       });
-      setSaved(true);
       setApiKey("");
-      setTimeout(() => setSaved(false), 10000);
+
+      const result = await applyConfig();
+      setSaveStatus("");
+
+      if (result.errors && result.errors.length > 0) {
+        setSaveError(
+          "Configuration saved but some banks failed to update: " +
+            result.errors.join("; ")
+        );
+      } else {
+        setSaved(true);
+        setTimeout(() => setSaved(false), 10000);
+      }
+
+      // Show note about OTel/DB restart if needed
+      if (result.note) {
+        setSaveError(result.note);
+      }
     } catch (e: any) {
+      setSaveStatus("");
       setSaveError(e?.message || "Failed to save configuration");
     }
     setSaving(false);
@@ -202,12 +253,17 @@ export default function ConfigPanel({ ddClient }: ConfigPanelProps) {
                   onClick={handleSave}
                   disabled={saving}
                 >
-                  {saving ? "Saving..." : "Save Configuration"}
+                  {saving ? "Saving..." : "Save & Apply"}
                 </Button>
+                {saveStatus && (
+                  <Alert severity="info" sx={{ mt: 1 }}>
+                    {saveStatus}
+                  </Alert>
+                )}
                 {saved && (
                   <Alert severity="success" sx={{ mt: 1 }}>
-                    Configuration saved. To apply changes, disable and re-enable the
-                    extension in Docker Desktop (Extensions tab), or restart Docker Desktop.
+                    Configuration saved and applied to existing banks. New banks will
+                  also use these settings.
                   </Alert>
                 )}
                 {saveError && (
@@ -216,6 +272,128 @@ export default function ConfigPanel({ ddClient }: ConfigPanelProps) {
                   </Alert>
                 )}
               </Box>
+            </CardContent>
+          </Card>
+
+          <Card sx={{ mt: 3 }}>
+            <CardContent>
+              <Box display="flex" alignItems="center" gap={1} mb={3}>
+                <StorageIcon color="primary" />
+                <Typography variant="h6">Database</Typography>
+              </Box>
+
+              <Alert severity="success" sx={{ mb: 3 }}>
+                By default, Hindsight uses a dedicated PostgreSQL container with pgvector.
+                Data is stored on a persistent Docker volume (<code>agent-memory-postgres-data</code>)
+                and survives restarts. Override below to use your own PostgreSQL instance.
+              </Alert>
+
+              <FormControlLabel
+                control={
+                  <Switch
+                    checked={useCustomDb}
+                    onChange={(e) => setUseCustomDb(e.target.checked)}
+                  />
+                }
+                label="Use custom PostgreSQL"
+              />
+              <Typography variant="body2" color="text.secondary" sx={{ ml: 4, mb: 2 }}>
+                Connect to your own PostgreSQL 14+ with pgvector instead of the bundled container.
+              </Typography>
+
+              <Collapse in={useCustomDb}>
+                <TextField
+                  fullWidth
+                  label="Database URL"
+                  value={databaseUrl}
+                  onChange={(e) => setDatabaseUrl(e.target.value)}
+                  sx={{ mb: 2 }}
+                  placeholder="postgresql://user:pass@host:5432/hindsight"
+                  helperText='PostgreSQL connection string. The database must have pgvector enabled (CREATE EXTENSION vector). Requires extension restart to take effect.'
+                />
+              </Collapse>
+            </CardContent>
+          </Card>
+
+          <Card sx={{ mt: 3 }}>
+            <CardContent>
+              <Box display="flex" alignItems="center" gap={1} mb={3}>
+                <MonitorHeartIcon color="primary" />
+                <Typography variant="h6">Monitoring</Typography>
+              </Box>
+
+              <Alert severity="info" sx={{ mb: 3 }}>
+                Enable OpenTelemetry tracing to send distributed traces to a Grafana
+                LGTM stack, Langfuse, or any OTLP-compatible backend. Prometheus metrics
+                are always available at{" "}
+                <code>http://localhost:8888/metrics</code>.
+              </Alert>
+
+              <FormControlLabel
+                control={
+                  <Switch
+                    checked={config.otel_traces_enabled === "true"}
+                    onChange={(e) =>
+                      setConfig({
+                        ...config,
+                        otel_traces_enabled: e.target.checked ? "true" : "false",
+                      })
+                    }
+                  />
+                }
+                label="Enable OpenTelemetry Tracing"
+              />
+              <Typography variant="body2" color="text.secondary" sx={{ ml: 4, mb: 2 }}>
+                Send distributed traces for all memory operations and LLM calls.
+              </Typography>
+
+              {config.otel_traces_enabled === "true" && (
+                <>
+                  <TextField
+                    fullWidth
+                    label="OTLP Endpoint"
+                    value={config.otel_endpoint}
+                    onChange={(e) =>
+                      setConfig({ ...config, otel_endpoint: e.target.value })
+                    }
+                    sx={{ mb: 2 }}
+                    helperText='OTLP HTTP endpoint, e.g., "http://host.docker.internal:4318" for Grafana LGTM. Use host.docker.internal instead of localhost.'
+                  />
+
+                  <TextField
+                    fullWidth
+                    label="OTLP Headers (optional)"
+                    value={config.otel_headers}
+                    onChange={(e) =>
+                      setConfig({ ...config, otel_headers: e.target.value })
+                    }
+                    sx={{ mb: 2 }}
+                    helperText='Format: "key1=value1,key2=value2". For authenticated endpoints, e.g., "Authorization=Bearer <token>".'
+                  />
+
+                  <TextField
+                    fullWidth
+                    label="Service Name (optional)"
+                    value={config.otel_service_name}
+                    onChange={(e) =>
+                      setConfig({ ...config, otel_service_name: e.target.value })
+                    }
+                    sx={{ mb: 2 }}
+                    helperText='Identifies this service in traces. Default: "hindsight-api".'
+                  />
+
+                  <TextField
+                    fullWidth
+                    label="Deployment Environment (optional)"
+                    value={config.otel_environment}
+                    onChange={(e) =>
+                      setConfig({ ...config, otel_environment: e.target.value })
+                    }
+                    sx={{ mb: 2 }}
+                    helperText='e.g., "development", "staging", "production". Default: "development".'
+                  />
+                </>
+              )}
             </CardContent>
           </Card>
         </Grid>
@@ -282,6 +460,49 @@ export default function ConfigPanel({ ddClient }: ConfigPanelProps) {
   http://localhost:8888/mcp/default/`}
                 </Typography>
               </Paper>
+            </CardContent>
+          </Card>
+
+          <Card sx={{ mt: 2 }}>
+            <CardContent>
+              <Typography variant="h6" gutterBottom>
+                Monitoring
+              </Typography>
+              <Typography variant="body2" color="text.secondary" paragraph>
+                Hindsight exposes Prometheus metrics at <code>/metrics</code> and
+                supports OpenTelemetry distributed tracing.
+              </Typography>
+
+              <Box sx={{ mb: 1 }}>
+                <Typography variant="subtitle2" color="primary">
+                  Grafana LGTM
+                </Typography>
+                <Typography variant="body2">
+                  Use a Grafana LGTM stack for traces (Tempo), metrics (Mimir), and
+                  logs (Loki) in one container. Set the OTLP endpoint to{" "}
+                  <code>http://host.docker.internal:4318</code>.
+                </Typography>
+              </Box>
+
+              <Box sx={{ mb: 1 }}>
+                <Typography variant="subtitle2" color="primary">
+                  Pre-built Dashboards
+                </Typography>
+                <Typography variant="body2">
+                  Operations, LLM Metrics, and API Service dashboards are available
+                  for import into Grafana.
+                </Typography>
+              </Box>
+
+              <Box>
+                <Typography variant="subtitle2" color="primary">
+                  Compatible Backends
+                </Typography>
+                <Typography variant="body2">
+                  Grafana LGTM, Langfuse, OpenLIT, DataDog, New Relic, Honeycomb — any
+                  OTLP HTTP backend.
+                </Typography>
+              </Box>
             </CardContent>
           </Card>
         </Grid>
