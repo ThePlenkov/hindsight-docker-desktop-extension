@@ -26,9 +26,30 @@
 - **Do NOT use pg0 (Hindsight's embedded Postgres)** — it has caused data loss in Docker Desktop Extension context (see: https://github.com/vectorize-io/hindsight/issues/675).
 
 ### Config Flow
-- Config is saved to `/data/config.json` and `/data/hindsight.env` on the `agent-memory-config` volume.
+- Config is saved to `/data/hindsight.yaml`, `/data/config.json`, and `/data/hindsight.env` on the `agent-memory-config` volume.
 - The `hindsight.env` file is **only sourced at container startup** by the entrypoint wrapper. Runtime changes require an extension restart.
+- `writeEnvFileFromYAML()` resolves `${secret.*}` placeholders inline — the env file always contains concrete values. This avoids a volume timing race where the Hindsight container starts before the API finishes writing secret files.
 - When editing config via Docker volumes from Git Bash on Windows, paths get mangled. Use `//data/` (double slash) to prevent Git Bash from interpreting `/data` as a Windows path.
+
+### Secrets
+- Secrets are stored as individual files in `/data/secrets/` on the `agent-memory-config` volume.
+- The YAML config uses `${secret.NAME}` placeholders (also supports `${file./path}` and `${env.VAR}`).
+- `GET /secrets` returns **only** secrets referenced as `${secret.*}` placeholders in the current YAML — not all stored secrets.
+- Auto-migration (`migrateHardcodedSecrets`) detects raw values at `sensitiveYAMLPaths` and converts to placeholders at startup.
+- **Timing constraint**: The Hindsight container mounts `agent-memory-config` as `/config:ro` and cannot see files the API writes after mount. That's why secrets are resolved inline into `hindsight.env` rather than read from separate files by the entrypoint.
+
+## Key Files
+
+| File | Purpose |
+|------|---------|
+| `backend/main.go` | API server, routes, config handlers, bank management, apply-config |
+| `backend/secrets.go` | Secret store CRUD, placeholder resolution, auto-migration |
+| `backend/yaml_config.go` | YAML config parsing, env file generation with inline secret resolution |
+| `ui/src/components/ConfigPanel.tsx` | Basic + Advanced YAML dual-mode settings UI, Secrets card |
+| `ui/src/components/monacoSecrets.ts` | Monaco decorations, hover, click-to-edit widget for `${secret.*}` |
+| `ui/src/hindsight-schema.json` | JSON Schema for YAML validation and autocomplete |
+| `compose.yaml` | 3-service architecture: api, postgres, hindsight |
+| `Dockerfile` | Multi-stage: bun for UI, golang for backend |
 
 ## Hindsight API
 
