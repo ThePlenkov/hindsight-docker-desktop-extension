@@ -27,6 +27,9 @@ import SaveIcon from "@mui/icons-material/Save";
 import MonitorHeartIcon from "@mui/icons-material/MonitorHeart";
 import StorageIcon from "@mui/icons-material/Storage";
 import CodeIcon from "@mui/icons-material/Code";
+import VpnKeyIcon from "@mui/icons-material/VpnKey";
+import CheckCircleIcon from "@mui/icons-material/CheckCircle";
+import ErrorOutlineIcon from "@mui/icons-material/ErrorOutline";
 
 // ── Monaco + YAML language service ──────────────────────────────────
 // Use the ESM API-only entrypoint — avoids bundling all built-in
@@ -36,6 +39,7 @@ import { configureMonacoYaml } from "monaco-yaml";
 import EditorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
 import YamlWorker from "monaco-yaml/yaml.worker?worker";
 import hindsightSchema from "../hindsight-schema.json";
+import { setupMonacoSecrets, MonacoSecretsHandle } from "./monacoSecrets";
 
 // Worker setup — must happen before any Monaco editor is created.
 window.MonacoEnvironment = {
@@ -93,6 +97,11 @@ interface Config {
   otel_environment: string;
 }
 
+interface SecretInfo {
+  name: string;
+  exists: boolean;
+}
+
 const LLM_PROVIDERS = [
   { value: "none", label: "None (offline mode)" },
   { value: "ollama", label: "Ollama (local)" },
@@ -103,6 +112,7 @@ const LLM_PROVIDERS = [
   { value: "gemini", label: "Google Gemini" },
   { value: "mock", label: "Mock (testing)" },
 ];
+
 
 export default function ConfigPanel({ ddClient }: ConfigPanelProps) {
   const theme = useTheme();
@@ -133,12 +143,32 @@ export default function ConfigPanel({ ddClient }: ConfigPanelProps) {
   const editorContainerRef = useRef<HTMLDivElement | null>(null);
   const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
   const modelRef = useRef<monaco.editor.ITextModel | null>(null);
+  const secretsHandleRef = useRef<MonacoSecretsHandle | null>(null);
 
   // ── Shared state ──
   const [saved, setSaved] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
   const [saveStatus, setSaveStatus] = useState("");
+
+  // ── Secrets state ──
+  const [secrets, setSecrets] = useState<SecretInfo[]>([]);
+  const [secretValues, setSecretValues] = useState<Record<string, string>>({});
+  const [savingSecrets, setSavingSecrets] = useState(false);
+  const [secretsSaved, setSecretsSaved] = useState(false);
+  const [secretsError, setSecretsError] = useState("");
+
+  // Fetch secrets list
+  const fetchSecrets = useCallback(async () => {
+    try {
+      const res = await ddClient.extension.vm?.service?.get("/secrets");
+      if (res?.secrets) {
+        setSecrets(res.secrets);
+      }
+    } catch {
+      // Backend may not be ready
+    }
+  }, [ddClient]);
 
   // Fetch basic config on mount
   useEffect(() => {
@@ -153,6 +183,7 @@ export default function ConfigPanel({ ddClient }: ConfigPanelProps) {
       }
     };
     fetchConfig();
+    fetchSecrets();
   }, []);
 
   // Get or create the Monaco model for the YAML file
@@ -209,7 +240,23 @@ export default function ConfigPanel({ ddClient }: ConfigPanelProps) {
     });
     editorRef.current = editor;
 
+    // Set up secret placeholder decorations, hover, and click-to-edit widget
+    const secretsHandle = setupMonacoSecrets(editor, secrets, async (name, value) => {
+      try {
+        await ddClient.extension.vm?.service?.post("/secrets", {
+          secrets: { [name]: value },
+        });
+        await fetchSecrets(); // triggers updateSecrets via the effect below
+        return true;
+      } catch {
+        return false;
+      }
+    });
+    secretsHandleRef.current = secretsHandle;
+
     return () => {
+      secretsHandle.dispose();
+      secretsHandleRef.current = null;
       editor.dispose();
       editorRef.current = null;
     };
@@ -219,6 +266,11 @@ export default function ConfigPanel({ ddClient }: ConfigPanelProps) {
   useEffect(() => {
     monaco.editor.setTheme(isDark ? "vs-dark" : "light");
   }, [isDark]);
+
+  // Push secret status updates to Monaco decorations
+  useEffect(() => {
+    secretsHandleRef.current?.updateSecrets(secrets);
+  }, [secrets]);
 
   // Fetch basic config when switching back to basic mode
   const fetchBasicConfig = useCallback(async () => {
@@ -242,6 +294,7 @@ export default function ConfigPanel({ ddClient }: ConfigPanelProps) {
     } else {
       fetchBasicConfig();
     }
+    fetchSecrets();
   };
 
   // Apply config to all existing banks
@@ -255,6 +308,32 @@ export default function ConfigPanel({ ddClient }: ConfigPanelProps) {
     };
   }, [ddClient]);
 
+  // Save secrets (from the Secrets card)
+  const handleSaveSecrets = useCallback(async () => {
+    const nonEmpty = Object.fromEntries(
+      Object.entries(secretValues).filter(([, v]) => v.trim())
+    );
+    if (Object.keys(nonEmpty).length === 0) return;
+
+    setSavingSecrets(true);
+    setSecretsSaved(false);
+    setSecretsError("");
+    try {
+      const res = await ddClient.extension.vm?.service?.post("/secrets", { secrets: nonEmpty });
+      if (res?.errors?.length) {
+        setSecretsError("Some secrets failed: " + res.errors.join("; "));
+      } else {
+        setSecretsSaved(true);
+        setSecretValues({});
+        setTimeout(() => setSecretsSaved(false), 5000);
+      }
+      await fetchSecrets();
+    } catch (e: any) {
+      setSecretsError(e?.message || "Failed to save secrets");
+    }
+    setSavingSecrets(false);
+  }, [ddClient, secretValues, fetchSecrets]);
+
   // Save from Basic mode
   const handleSaveBasic = async () => {
     setSaving(true);
@@ -262,12 +341,22 @@ export default function ConfigPanel({ ddClient }: ConfigPanelProps) {
     setSaveError("");
     setSaveStatus("Saving configuration...");
     try {
+      // If user entered an API key, store it as a secret first
+      let apiKeyValue: string | undefined;
+      if (apiKey) {
+        await ddClient.extension.vm?.service?.post("/secrets", {
+          secrets: { LLM_API_KEY: apiKey },
+        });
+        apiKeyValue = "${secret.LLM_API_KEY}";
+      }
+
       await ddClient.extension.vm?.service?.post("/config", {
         ...config,
-        llm_api_key: apiKey || undefined,
+        llm_api_key: apiKeyValue,
         database_url: useCustomDb ? databaseUrl || undefined : undefined,
       });
       setApiKey("");
+      await fetchSecrets();
 
       const result = await applyConfig();
       setSaveStatus("");
@@ -313,6 +402,7 @@ export default function ConfigPanel({ ddClient }: ConfigPanelProps) {
         return;
       }
 
+      await fetchSecrets();
       const result = await applyConfig();
       setSaveStatus("");
 
@@ -418,7 +508,7 @@ export default function ConfigPanel({ ddClient }: ConfigPanelProps) {
                     value={apiKey}
                     onChange={(e) => setApiKey(e.target.value)}
                     sx={{ mb: 2 }}
-                    helperText="Your API key (stored as environment variable)"
+                    helperText="Your API key (stored securely in the secret store)"
                   />
                 )}
 
@@ -676,6 +766,76 @@ export default function ConfigPanel({ ddClient }: ConfigPanelProps) {
 
             <Card sx={{ mt: 2 }}>
               <CardContent>
+                <Box display="flex" alignItems="center" gap={1} mb={2}>
+                  <VpnKeyIcon color="primary" />
+                  <Typography variant="h6">Secrets</Typography>
+                </Box>
+                <Typography variant="body2" color="text.secondary" paragraph>
+                  Manage secrets referenced in your config via{" "}
+                  <code>{"${secret.NAME}"}</code> placeholders. Secrets are resolved
+                  into the env file at save time.
+                </Typography>
+
+                {secrets.length === 0 && (
+                  <Typography variant="body2" color="text.secondary">
+                    No <code>{"${secret.*}"}</code> placeholders in config.
+                    Switch to Advanced mode to use secret placeholders.
+                  </Typography>
+                )}
+                {secrets.map((s) => (
+                  <Box key={s.name} sx={{ mb: 1.5 }}>
+                    <Box display="flex" alignItems="center" gap={1} mb={0.5}>
+                      {s.exists ? (
+                        <CheckCircleIcon fontSize="small" color="success" />
+                      ) : (
+                        <ErrorOutlineIcon fontSize="small" color="error" />
+                      )}
+                      <Typography variant="subtitle2" fontFamily="monospace" fontSize={12}>
+                        {s.name}
+                      </Typography>
+                      <Typography variant="caption" color={s.exists ? "success.main" : "error.main"}>
+                        {s.exists ? "set" : "missing"}
+                      </Typography>
+                    </Box>
+                    <TextField
+                      size="small"
+                      fullWidth
+                      type="password"
+                      placeholder={s.exists ? "••••••• (update)" : "Enter value..."}
+                      value={secretValues[s.name] || ""}
+                      onChange={(e) =>
+                        setSecretValues((prev) => ({ ...prev, [s.name]: e.target.value }))
+                      }
+                    />
+                  </Box>
+                ))}
+                {secrets.length > 0 && (
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    startIcon={savingSecrets ? <CircularProgress size={14} /> : <SaveIcon />}
+                    onClick={handleSaveSecrets}
+                    disabled={savingSecrets || !Object.values(secretValues).some((v) => v.trim())}
+                    sx={{ mt: 1 }}
+                  >
+                    {savingSecrets ? "Saving..." : "Save Secrets"}
+                  </Button>
+                )}
+                {secretsSaved && (
+                  <Alert severity="success" sx={{ mt: 1 }}>
+                    Secrets saved. Apply config to push changes to Hindsight.
+                  </Alert>
+                )}
+                {secretsError && (
+                  <Alert severity="error" sx={{ mt: 1 }} onClose={() => setSecretsError("")}>
+                    {secretsError}
+                  </Alert>
+                )}
+              </CardContent>
+            </Card>
+
+            <Card sx={{ mt: 2 }}>
+              <CardContent>
                 <Typography variant="h6" gutterBottom>
                   Monitoring
                 </Typography>
@@ -827,6 +987,77 @@ export default function ConfigPanel({ ddClient }: ConfigPanelProps) {
 
             <Card sx={{ mt: 2 }}>
               <CardContent>
+                <Box display="flex" alignItems="center" gap={1} mb={2}>
+                  <VpnKeyIcon color="primary" />
+                  <Typography variant="h6">Secrets</Typography>
+                </Box>
+                <Typography variant="body2" color="text.secondary" paragraph>
+                  Use <code>{"${secret.NAME}"}</code> placeholders in your YAML for
+                  sensitive values. Secrets are resolved into the env file when you
+                  save.
+                </Typography>
+
+                {secrets.length === 0 && (
+                  <Typography variant="body2" color="text.secondary">
+                    No <code>{"${secret.*}"}</code> placeholders in your YAML yet.
+                    Add one (e.g. <code>{"api_key: ${secret.LLM_API_KEY}"}</code>) and
+                    save to see it here.
+                  </Typography>
+                )}
+                {secrets.map((s) => (
+                  <Box key={s.name} sx={{ mb: 1.5 }}>
+                    <Box display="flex" alignItems="center" gap={1} mb={0.5}>
+                      {s.exists ? (
+                        <CheckCircleIcon fontSize="small" color="success" />
+                      ) : (
+                        <ErrorOutlineIcon fontSize="small" color="error" />
+                      )}
+                      <Typography variant="subtitle2" fontFamily="monospace" fontSize={12}>
+                        {s.name}
+                      </Typography>
+                      <Typography variant="caption" color={s.exists ? "success.main" : "error.main"}>
+                        {s.exists ? "set" : "missing"}
+                      </Typography>
+                    </Box>
+                    <TextField
+                      size="small"
+                      fullWidth
+                      type="password"
+                      placeholder={s.exists ? "••••••• (update)" : "Enter value..."}
+                      value={secretValues[s.name] || ""}
+                      onChange={(e) =>
+                        setSecretValues((prev) => ({ ...prev, [s.name]: e.target.value }))
+                      }
+                    />
+                  </Box>
+                ))}
+                {secrets.length > 0 && (
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    startIcon={savingSecrets ? <CircularProgress size={14} /> : <SaveIcon />}
+                    onClick={handleSaveSecrets}
+                    disabled={savingSecrets || !Object.values(secretValues).some((v) => v.trim())}
+                    sx={{ mt: 1 }}
+                  >
+                    {savingSecrets ? "Saving..." : "Save Secrets"}
+                  </Button>
+                )}
+                {secretsSaved && (
+                  <Alert severity="success" sx={{ mt: 1 }}>
+                    Secrets saved. Click "Save & Apply" to push to Hindsight.
+                  </Alert>
+                )}
+                {secretsError && (
+                  <Alert severity="error" sx={{ mt: 1 }} onClose={() => setSecretsError("")}>
+                    {secretsError}
+                  </Alert>
+                )}
+              </CardContent>
+            </Card>
+
+            <Card sx={{ mt: 2 }}>
+              <CardContent>
                 <Typography variant="h6" gutterBottom>
                   Per-Operation LLM
                 </Typography>
@@ -870,16 +1101,17 @@ hindsight:
     llm:
       provider: openai
       model: gpt-4o-mini
+      api_key: \${secret.LLM_API_KEY}
     retain:
       llm:
         provider: groq
         model: openai/gpt-oss-20b
-        api_key: gsk_xxx
+        api_key: \${secret.GROQ_API_KEY}
     reflect:
       llm:
         provider: groq
         model: openai/gpt-oss-120b
-        api_key: gsk_xxx`}
+        api_key: \${secret.GROQ_API_KEY}`}
                   </Typography>
                 </Paper>
               </CardContent>

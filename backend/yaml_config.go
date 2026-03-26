@@ -261,20 +261,34 @@ func saveYAMLMap(root map[string]interface{}) error {
 }
 
 // writeEnvFileFromYAML flattens the YAML tree and writes hindsight.env.
+// Values containing ${secret.…} placeholders are resolved inline so the
+// env file always has concrete values (the Hindsight container sources it
+// at startup and there's no guarantee secret files are visible yet).
 func writeEnvFileFromYAML(root map[string]interface{}) error {
 	envVars := flattenMap(root, "")
 
-	// Filter to HINDSIGHT_API_* only (ignore any stray keys)
+	// Filter to HINDSIGHT_* only, resolve any placeholders inline
 	var lines []string
+	secretCount := 0
 	for k, v := range envVars {
-		if strings.HasPrefix(k, "HINDSIGHT_") && v != "" {
-			lines = append(lines, fmt.Sprintf("export %s=%q", k, v))
+		if !strings.HasPrefix(k, "HINDSIGHT_") || v == "" {
+			continue
 		}
+		if isPlaceholder(v) {
+			resolved, err := resolveValue(v)
+			if err != nil {
+				log.Printf("WARNING: resolve %s: %v", k, err)
+				continue // skip unresolvable placeholders
+			}
+			v = resolved
+			secretCount++
+		}
+		lines = append(lines, fmt.Sprintf("export %s=%q", k, v))
 	}
 	sort.Strings(lines) // deterministic output
 
 	content := strings.Join(lines, "\n") + "\n"
-	log.Printf("writing env file to %s (%d vars)", envFilePath, len(lines))
+	log.Printf("writing env file to %s (%d vars, %d secrets)", envFilePath, len(lines), secretCount)
 	return os.WriteFile(envFilePath, []byte(content), 0644)
 }
 

@@ -91,6 +91,8 @@ func main() {
 	mux.HandleFunc("/config", handleConfig)
 	mux.HandleFunc("/config/yaml", handleConfigYAML)
 	mux.HandleFunc("/apply-config", handleApplyConfig)
+	mux.HandleFunc("/secrets", handleSecrets)
+	mux.HandleFunc("/secrets/", handleSecretByName)
 	mux.HandleFunc("/restart", handleRestart)
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -118,6 +120,14 @@ func main() {
 		if err != nil {
 			log.Printf("WARNING: failed to parse YAML config: %v", err)
 		} else {
+			// Auto-migrate any hardcoded secrets to ${secret.*} placeholders
+			if migrateHardcodedSecrets(root) {
+				log.Println("migrated hardcoded secrets to placeholders, re-saving YAML")
+				if err := saveYAMLMap(root); err != nil {
+					log.Printf("WARNING: failed to save migrated YAML: %v", err)
+				}
+			}
+
 			if err := writeEnvFileFromYAML(root); err != nil {
 				log.Printf("WARNING: failed to write env file: %v", err)
 			} else {
@@ -593,6 +603,9 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 		// Update the YAML tree with basic fields (preserves advanced settings)
 		legacyToYAML(root, incoming)
 
+		// Auto-migrate any raw secrets that slipped through
+		migrateHardcodedSecrets(root)
+
 		if err := saveYAMLMap(root); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("save config: %v", err)})
 			return
@@ -635,14 +648,24 @@ func handleConfigYAML(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Validate: must be parseable YAML
-		if _, err := parseYAML([]byte(yamlText)); err != nil {
+		root, err := parseYAML([]byte(yamlText))
+		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("invalid YAML: %v", err)})
 			return
 		}
 
-		if err := saveYAMLRaw([]byte(yamlText)); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("save YAML: %v", err)})
-			return
+		// Auto-migrate any raw secrets in the YAML
+		if migrateHardcodedSecrets(root) {
+			log.Println("migrated hardcoded secrets in YAML editor save")
+			if err := saveYAMLMap(root); err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("save YAML: %v", err)})
+				return
+			}
+		} else {
+			if err := saveYAMLRaw([]byte(yamlText)); err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("save YAML: %v", err)})
+				return
+			}
 		}
 		log.Printf("config saved via YAML editor")
 
@@ -679,8 +702,8 @@ func handleApplyConfig(w http.ResponseWriter, r *http.Request) {
 	// Build the overrides from ALL HINDSIGHT_API_* vars
 	overrides := flattenYAMLToOverrides(root)
 
-	// Some settings should not be pushed per-bank (they're server-level)
-	// but Hindsight will ignore unknown keys in the PATCH, so it's safe.
+	// Resolve any ${secret.*}, ${file.*}, ${env.*} placeholders before PATCHing
+	overrides = resolveOverrides(overrides)
 
 	// Fetch the list of banks
 	base := getHindsightBase()
@@ -761,6 +784,122 @@ func handleApplyConfig(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("apply-config: pushed config to %d/%d banks (%d env vars)", len(applied), len(bankIDs), len(overrides))
 	writeJSON(w, http.StatusOK, result)
+}
+
+// handleSecrets manages the secret store.
+// GET  /secrets          — list all secrets (names + metadata, NOT values)
+// POST /secrets          — bulk upsert: {"secrets": {"NAME": "value", ...}}
+func handleSecrets(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		// Return only secrets referenced as ${secret.*} in the YAML config.
+		type secretInfo struct {
+			Name   string `json:"name"`
+			Exists bool   `json:"exists"`
+		}
+		var infos []secretInfo
+		yamlData, _ := loadYAMLRaw()
+		if yamlData != nil {
+			root, _ := parseYAML(yamlData)
+			if root != nil {
+				seen := make(map[string]bool)
+				for _, phs := range extractAllPlaceholders(root) {
+					for _, ph := range phs {
+						if ph.Kind == "secret" && !seen[ph.Ref] {
+							seen[ph.Ref] = true
+							infos = append(infos, secretInfo{
+								Name:   ph.Ref,
+								Exists: secretExists(ph.Ref),
+							})
+						}
+					}
+				}
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"secrets": infos})
+
+	case http.MethodPost:
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to read body"})
+			return
+		}
+		var req struct {
+			Secrets map[string]string `json:"secrets"`
+		}
+		if err := json.Unmarshal(body, &req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+			return
+		}
+		var saved []string
+		var errs []string
+		for name, value := range req.Secrets {
+			if value == "" {
+				if err := deleteSecret(name); err != nil {
+					errs = append(errs, fmt.Sprintf("%s: %v", name, err))
+				}
+				continue
+			}
+			if err := writeSecret(name, value); err != nil {
+				errs = append(errs, fmt.Sprintf("%s: %v", name, err))
+			} else {
+				saved = append(saved, name)
+			}
+		}
+		result := map[string]interface{}{"saved": saved}
+		if len(errs) > 0 {
+			result["errors"] = errs
+		}
+		log.Printf("secrets: saved %d, errors %d", len(saved), len(errs))
+		writeJSON(w, http.StatusOK, result)
+
+	default:
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+	}
+}
+
+// handleSecretByName manages individual secrets.
+// PUT    /secrets/{name} — set a single secret
+// DELETE /secrets/{name} — delete a single secret
+func handleSecretByName(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimPrefix(r.URL.Path, "/secrets/")
+	if name == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "secret name required"})
+		return
+	}
+
+	switch r.Method {
+	case http.MethodPut:
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to read body"})
+			return
+		}
+		var req struct {
+			Value string `json:"value"`
+		}
+		if err := json.Unmarshal(body, &req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+			return
+		}
+		if err := writeSecret(name, req.Value); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("write secret: %v", err)})
+			return
+		}
+		log.Printf("secret %q saved", name)
+		writeJSON(w, http.StatusOK, map[string]string{"message": fmt.Sprintf("secret %q saved", name)})
+
+	case http.MethodDelete:
+		if err := deleteSecret(name); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("delete secret: %v", err)})
+			return
+		}
+		log.Printf("secret %q deleted", name)
+		writeJSON(w, http.StatusOK, map[string]string{"message": fmt.Sprintf("secret %q deleted", name)})
+
+	default:
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+	}
 }
 
 func handleRestart(w http.ResponseWriter, r *http.Request) {
