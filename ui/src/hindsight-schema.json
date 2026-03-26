@@ -1,0 +1,299 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Hindsight Configuration",
+  "description": "YAML configuration for Hindsight memory service. Nested keys map to HINDSIGHT_API_* env vars.",
+  "type": "object",
+  "properties": {
+    "hindsight": {
+      "type": "object",
+      "description": "Root configuration namespace",
+      "properties": {
+        "api": {
+          "type": "object",
+          "description": "Hindsight API configuration (maps to HINDSIGHT_API_* env vars)",
+          "properties": {
+            "llm": {
+              "$ref": "#/definitions/llm_config",
+              "description": "Global LLM config — used as fallback for retain, reflect, and consolidation"
+            },
+            "retain": {
+              "type": "object",
+              "description": "Retain (fact extraction) pipeline settings",
+              "properties": {
+                "llm": {
+                  "$ref": "#/definitions/llm_config",
+                  "description": "LLM override for retain operations. Top models: openai/gpt-oss-20b (Groq), gpt-4.1-nano (OpenAI)"
+                },
+                "extraction_mode": {
+                  "type": "string",
+                  "enum": ["concise", "verbose", "verbatim", "chunks", "custom"],
+                  "description": "How facts are extracted from retained content",
+                  "default": "concise"
+                },
+                "chunk_size": {
+                  "type": "string",
+                  "description": "Max characters per chunk when using 'chunks' strategy",
+                  "default": "3000"
+                },
+                "extract_causal_links": {
+                  "type": "string",
+                  "enum": ["true", "false"],
+                  "description": "Whether to extract cause-effect relationships",
+                  "default": "true"
+                },
+                "mission": {
+                  "type": "string",
+                  "description": "System prompt guidance for fact extraction, e.g. 'Focus on technical decisions and architecture choices.'"
+                }
+              },
+              "additionalProperties": true
+            },
+            "reflect": {
+              "type": "object",
+              "description": "Reflect (agentic reasoning) settings",
+              "properties": {
+                "llm": {
+                  "$ref": "#/definitions/llm_config",
+                  "description": "LLM override for reflect operations. Top models: openai/gpt-oss-120b (Groq), gemini-2.5-flash-lite"
+                },
+                "max_iterations": {
+                  "type": "string",
+                  "description": "Maximum agentic reasoning iterations",
+                  "default": "10"
+                },
+                "max_context_tokens": {
+                  "type": "string",
+                  "description": "Max context window tokens for reflect",
+                  "default": "100000"
+                },
+                "wall_timeout": {
+                  "type": "string",
+                  "description": "Max wall-clock seconds for a reflect operation",
+                  "default": "300"
+                }
+              },
+              "additionalProperties": true
+            },
+            "consolidation": {
+              "type": "object",
+              "description": "Observation consolidation settings",
+              "properties": {
+                "llm": {
+                  "$ref": "#/definitions/llm_config",
+                  "description": "LLM override for consolidation operations"
+                }
+              },
+              "additionalProperties": true
+            },
+            "embeddings": {
+              "type": "object",
+              "description": "Embedding model configuration for vector search",
+              "properties": {
+                "provider": {
+                  "type": "string",
+                  "enum": ["local", "openai", "cohere", "tei", "litellm"],
+                  "description": "Embeddings provider. 'local' uses bundled ONNX model.",
+                  "default": "local"
+                },
+                "local_model": {
+                  "type": "string",
+                  "description": "Hugging Face model name for local embeddings",
+                  "default": "BAAI/bge-small-en-v1.5"
+                },
+                "model": {
+                  "type": "string",
+                  "description": "Model name for remote embedding providers"
+                },
+                "base_url": {
+                  "type": "string",
+                  "description": "Base URL for embedding API"
+                },
+                "api_key": {
+                  "type": "string",
+                  "description": "API key for embedding provider"
+                }
+              },
+              "additionalProperties": true
+            },
+            "reranker": {
+              "type": "object",
+              "description": "Reranker model for improving recall quality",
+              "properties": {
+                "provider": {
+                  "type": "string",
+                  "enum": ["local", "cohere", "litellm", "rrf"],
+                  "description": "Reranker provider. 'local' uses bundled cross-encoder, 'rrf' uses reciprocal rank fusion.",
+                  "default": "local"
+                },
+                "local_model": {
+                  "type": "string",
+                  "description": "Hugging Face model for local reranker",
+                  "default": "cross-encoder/ms-marco-MiniLM-L-6-v2"
+                },
+                "model": {
+                  "type": "string",
+                  "description": "Model name for remote reranker"
+                },
+                "base_url": {
+                  "type": "string",
+                  "description": "Base URL for reranker API"
+                },
+                "api_key": {
+                  "type": "string",
+                  "description": "API key for reranker provider"
+                }
+              },
+              "additionalProperties": true
+            },
+            "disposition": {
+              "type": "object",
+              "description": "Reflect personality traits (1=low, 5=high)",
+              "properties": {
+                "skepticism": {
+                  "type": "string",
+                  "enum": ["1", "2", "3", "4", "5"],
+                  "description": "How critically the agent evaluates claims",
+                  "default": "3"
+                },
+                "literalism": {
+                  "type": "string",
+                  "enum": ["1", "2", "3", "4", "5"],
+                  "description": "How literally the agent interprets queries",
+                  "default": "3"
+                },
+                "empathy": {
+                  "type": "string",
+                  "enum": ["1", "2", "3", "4", "5"],
+                  "description": "How much the agent considers emotional context",
+                  "default": "3"
+                }
+              },
+              "additionalProperties": false
+            },
+            "database": {
+              "type": "object",
+              "description": "Database connection settings",
+              "properties": {
+                "url": {
+                  "type": "string",
+                  "description": "PostgreSQL connection URL. Default: postgresql://hindsight:hindsight@postgres:5432/hindsight",
+                  "examples": ["postgresql://user:pass@host:5432/hindsight"]
+                }
+              },
+              "additionalProperties": true
+            },
+            "enable_observations": {
+              "type": "string",
+              "enum": ["true", "false"],
+              "description": "Enable automatic observation extraction from agent interactions",
+              "default": "false"
+            },
+            "skip_llm_verification": {
+              "type": "string",
+              "enum": ["true", "false"],
+              "description": "Skip LLM connectivity check at startup",
+              "default": "true"
+            },
+            "lazy_reranker": {
+              "type": "string",
+              "enum": ["true", "false"],
+              "description": "Load reranker model lazily on first use instead of at startup",
+              "default": "true"
+            },
+            "log_level": {
+              "type": "string",
+              "enum": ["debug", "info", "warn", "error"],
+              "description": "Log verbosity level",
+              "default": "info"
+            },
+            "workers": {
+              "type": "string",
+              "description": "Number of API worker threads",
+              "default": "1"
+            },
+            "otel": {
+              "type": "object",
+              "description": "OpenTelemetry distributed tracing configuration",
+              "properties": {
+                "traces_enabled": {
+                  "type": "string",
+                  "enum": ["true", "false"],
+                  "description": "Enable OTLP trace export",
+                  "default": "false"
+                },
+                "exporter": {
+                  "type": "object",
+                  "properties": {
+                    "otlp": {
+                      "type": "object",
+                      "properties": {
+                        "endpoint": {
+                          "type": "string",
+                          "description": "OTLP HTTP endpoint. Use host.docker.internal instead of localhost.",
+                          "examples": ["http://host.docker.internal:4318"]
+                        },
+                        "headers": {
+                          "type": "string",
+                          "description": "OTLP headers as key=value,key2=value2"
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "service_name": {
+                  "type": "string",
+                  "description": "Service name in traces",
+                  "default": "hindsight-api"
+                },
+                "deployment_environment": {
+                  "type": "string",
+                  "description": "Deployment environment label",
+                  "default": "development"
+                }
+              },
+              "additionalProperties": true
+            }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "llm_config": {
+      "type": "object",
+      "description": "LLM provider configuration",
+      "properties": {
+        "provider": {
+          "type": "string",
+          "enum": ["openai", "anthropic", "groq", "gemini", "ollama", "lmstudio", "litellm", "mock"],
+          "description": "LLM provider type. Use 'openai' for OpenAI-compatible APIs (including LiteLLM proxy). Use 'mock' to disable LLM."
+        },
+        "model": {
+          "type": "string",
+          "description": "Model identifier, e.g. 'gpt-4o-mini', 'llama3.2', 'claude-sonnet-4-20250514'",
+          "examples": ["gpt-4o-mini", "openai/gpt-oss-20b", "openai/gpt-oss-120b", "llama3.2", "gemini-2.5-flash-lite"]
+        },
+        "base_url": {
+          "type": "string",
+          "description": "Base URL for the LLM API. Use host.docker.internal instead of localhost.",
+          "examples": ["http://host.docker.internal:4000", "http://host.docker.internal:11434"]
+        },
+        "api_key": {
+          "type": "string",
+          "description": "API key for the LLM provider"
+        },
+        "max_concurrent": {
+          "type": "string",
+          "description": "Max concurrent LLM requests",
+          "default": "1"
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}

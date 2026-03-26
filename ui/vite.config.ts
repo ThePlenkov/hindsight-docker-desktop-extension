@@ -7,4 +7,8 @@ export default defineConfig({
   build: {
     outDir: "dist",
   },
+  worker: {
+    // Ensure web workers (monaco-yaml yaml.worker) are bundled as ES modules
+    format: "es",
+  },
 });

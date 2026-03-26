@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import {
   Alert,
   Box,
@@ -20,12 +20,57 @@ import {
   Tabs,
   TextField,
   Typography,
+  useTheme,
 } from "@mui/material";
 import SettingsIcon from "@mui/icons-material/Settings";
 import SaveIcon from "@mui/icons-material/Save";
 import MonitorHeartIcon from "@mui/icons-material/MonitorHeart";
 import StorageIcon from "@mui/icons-material/Storage";
 import CodeIcon from "@mui/icons-material/Code";
+
+// ── Monaco + YAML language service ──────────────────────────────────
+// Use the ESM API-only entrypoint — avoids bundling all built-in
+// language workers (TypeScript, CSS, HTML, JSON) that we don't need.
+import * as monaco from "monaco-editor/esm/vs/editor/editor.api";
+import { configureMonacoYaml } from "monaco-yaml";
+import EditorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
+import YamlWorker from "monaco-yaml/yaml.worker?worker";
+import hindsightSchema from "../hindsight-schema.json";
+
+// Worker setup — must happen before any Monaco editor is created.
+window.MonacoEnvironment = {
+  getWorker(_moduleId: string, label: string) {
+    switch (label) {
+      case "editorWorkerService":
+        return new EditorWorker();
+      case "yaml":
+        return new YamlWorker();
+      default:
+        // Return the editor worker as fallback instead of throwing.
+        // With the ESM API-only import, no other workers should be
+        // requested, but this is safer than crashing.
+        return new EditorWorker();
+    }
+  },
+};
+
+// Configure YAML language service with Hindsight schema
+configureMonacoYaml(monaco, {
+  validate: true,
+  completion: true,
+  hover: true,
+  format: true,
+  schemas: [
+    {
+      uri: "https://hindsight.vectorize.io/developer/configuration",
+      fileMatch: ["**/hindsight.yaml"],
+      schema: hindsightSchema as any,
+    },
+  ],
+});
+
+// Fake file URI so monaco-yaml matches the schema
+const MODEL_URI = monaco.Uri.parse("file:///hindsight.yaml");
 
 interface ConfigPanelProps {
   ddClient: any;
@@ -60,6 +105,9 @@ const LLM_PROVIDERS = [
 ];
 
 export default function ConfigPanel({ ddClient }: ConfigPanelProps) {
+  const theme = useTheme();
+  const isDark = theme.palette.mode === "dark";
+
   // ── Mode toggle: 0 = Basic, 1 = Advanced YAML ──
   const [mode, setMode] = useState(0);
 
@@ -81,8 +129,10 @@ export default function ConfigPanel({ ddClient }: ConfigPanelProps) {
   const [useCustomDb, setUseCustomDb] = useState(false);
 
   // ── YAML mode state ──
-  const [yamlText, setYamlText] = useState("");
   const [yamlLoaded, setYamlLoaded] = useState(false);
+  const editorContainerRef = useRef<HTMLDivElement | null>(null);
+  const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
+  const modelRef = useRef<monaco.editor.ITextModel | null>(null);
 
   // ── Shared state ──
   const [saved, setSaved] = useState(false);
@@ -105,24 +155,70 @@ export default function ConfigPanel({ ddClient }: ConfigPanelProps) {
     fetchConfig();
   }, []);
 
+  // Get or create the Monaco model for the YAML file
+  const getModel = useCallback(() => {
+    const existing = monaco.editor.getModel(MODEL_URI);
+    if (existing) {
+      modelRef.current = existing;
+      return existing;
+    }
+    const m = monaco.editor.createModel("", "yaml", MODEL_URI);
+    modelRef.current = m;
+    return m;
+  }, []);
+
   // Fetch YAML when switching to advanced mode
   const fetchYAML = useCallback(async () => {
     try {
       const res = await ddClient.extension.vm?.service?.get("/config/yaml");
-      if (res?.yaml) {
-        setYamlText(res.yaml);
-        setYamlLoaded(true);
-      } else if (res) {
-        // Fallback: if structure differs, show whatever we got
-        const text = typeof res === "string" ? res : JSON.stringify(res, null, 2);
-        setYamlText(text);
-        setYamlLoaded(true);
-      }
+      const text = res?.yaml ?? (typeof res === "string" ? res : "");
+      const model = getModel();
+      model.setValue(text);
+      setYamlLoaded(true);
     } catch {
-      setYamlText("# Failed to load YAML config. Save from Basic mode first.");
+      const model = getModel();
+      model.setValue("# Failed to load YAML config. Save from Basic mode first.");
       setYamlLoaded(true);
     }
-  }, [ddClient]);
+  }, [ddClient, getModel]);
+
+  // Create/destroy the Monaco editor when the YAML tab mounts/unmounts
+  useEffect(() => {
+    if (mode !== 1 || !editorContainerRef.current) return;
+
+    const model = getModel();
+
+    // Create the Monaco editor instance (raw, no @monaco-editor/react)
+    const editor = monaco.editor.create(editorContainerRef.current, {
+      model,
+      theme: isDark ? "vs-dark" : "light",
+      automaticLayout: true,
+      minimap: { enabled: false },
+      fontSize: 13,
+      lineNumbers: "on",
+      scrollBeyondLastLine: false,
+      wordWrap: "on",
+      tabSize: 2,
+      padding: { top: 8 },
+      quickSuggestions: {
+        other: true,
+        comments: false,
+        strings: true,
+      },
+      suggestOnTriggerCharacters: true,
+    });
+    editorRef.current = editor;
+
+    return () => {
+      editor.dispose();
+      editorRef.current = null;
+    };
+  }, [mode, yamlLoaded, getModel, isDark]);
+
+  // Sync Monaco theme with MUI dark/light mode
+  useEffect(() => {
+    monaco.editor.setTheme(isDark ? "vs-dark" : "light");
+  }, [isDark]);
 
   // Fetch basic config when switching back to basic mode
   const fetchBasicConfig = useCallback(async () => {
@@ -198,6 +294,11 @@ export default function ConfigPanel({ ddClient }: ConfigPanelProps) {
 
   // Save from YAML mode
   const handleSaveYAML = async () => {
+    const yamlText = modelRef.current?.getValue() ?? "";
+    if (!yamlText.trim()) {
+      setSaveError("YAML is empty");
+      return;
+    }
     setSaving(true);
     setSaved(false);
     setSaveError("");
@@ -642,29 +743,14 @@ export default function ConfigPanel({ ddClient }: ConfigPanelProps) {
                     <CircularProgress />
                   </Box>
                 ) : (
-                  <TextField
-                    multiline
-                    fullWidth
-                    minRows={24}
-                    maxRows={50}
-                    value={yamlText}
-                    onChange={(e) => setYamlText(e.target.value)}
-                    InputProps={{
-                      sx: {
-                        fontFamily: "'JetBrains Mono', 'Fira Code', 'Consolas', monospace",
-                        fontSize: 13,
-                        lineHeight: 1.5,
-                        "& textarea": {
-                          whiteSpace: "pre",
-                          overflowWrap: "normal",
-                          overflowX: "auto",
-                        },
-                      },
-                    }}
+                  <Box
+                    ref={editorContainerRef}
                     sx={{
-                      "& .MuiOutlinedInput-root": {
-                        bgcolor: "background.default",
-                      },
+                      height: 520,
+                      border: 1,
+                      borderColor: "divider",
+                      borderRadius: 1,
+                      overflow: "hidden",
                     }}
                   />
                 )}
