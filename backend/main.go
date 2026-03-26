@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -90,6 +89,7 @@ func main() {
 	mux.HandleFunc("/recall", handleRecall)
 	mux.HandleFunc("/reflect", handleReflect)
 	mux.HandleFunc("/config", handleConfig)
+	mux.HandleFunc("/config/yaml", handleConfigYAML)
 	mux.HandleFunc("/apply-config", handleApplyConfig)
 	mux.HandleFunc("/restart", handleRestart)
 
@@ -110,15 +110,21 @@ func main() {
 	// Config is loaded by the Hindsight entrypoint wrapper from the shared
 	// /config volume at container startup. Generate the env file from any
 	// existing config so Hindsight picks it up.
-	cfg := loadConfig()
-	hasLLM := cfg.LLMProvider != "" && cfg.LLMProvider != "none"
-	hasOtel := cfg.OtelTracesEnabled == "true"
-	hasDB := cfg.DatabaseURL != ""
-	if hasLLM || hasOtel || hasDB {
-		if err := writeEnvFile(cfg); err != nil {
-			log.Printf("WARNING: failed to write env file: %v", err)
+	yamlData, err := loadYAMLRaw()
+	if err != nil {
+		log.Printf("WARNING: failed to load YAML config: %v", err)
+	} else if yamlData != nil {
+		root, err := parseYAML(yamlData)
+		if err != nil {
+			log.Printf("WARNING: failed to parse YAML config: %v", err)
 		} else {
-			log.Printf("wrote hindsight.env: provider=%s model=%s otel=%s", cfg.LLMProvider, cfg.LLMModel, cfg.OtelTracesEnabled)
+			if err := writeEnvFileFromYAML(root); err != nil {
+				log.Printf("WARNING: failed to write env file: %v", err)
+			} else {
+				provider := getYAMLPath(root, "hindsight.api.llm.provider")
+				model := getYAMLPath(root, "hindsight.api.llm.model")
+				log.Printf("wrote hindsight.env from YAML: provider=%s model=%s", provider, model)
+			}
 		}
 	}
 
@@ -484,10 +490,11 @@ func handleReflect(w http.ResponseWriter, r *http.Request) {
 	proxyToHindsightWithTimeout(w, "POST", "/v1/default/banks/"+bankID+"/reflect", strings.NewReader(string(body)), 120*time.Second)
 }
 
-// configPath is the persistent config file location (must be on a volume).
+// configPath is the legacy config file location (used for migration).
 const configPath = "/data/config.json"
 
-// llmConfig holds the LLM, database, and monitoring configuration fields.
+// llmConfig holds the basic config fields for the card-based UI.
+// This is a subset of what the YAML config supports.
 type llmConfig struct {
 	LLMProvider        string `json:"llm_provider"`
 	LLMModel           string `json:"llm_model"`
@@ -505,132 +512,36 @@ type llmConfig struct {
 	OtelEnvironment    string `json:"otel_environment"`
 }
 
-// loadConfig reads persisted config from disk, falling back to env vars.
-func loadConfig() llmConfig {
-	cfg := llmConfig{
-		LLMProvider:        getEnvDefault("LLM_PROVIDER", "none"),
-		LLMModel:           getEnvDefault("LLM_MODEL", ""),
-		LLMBaseURL:         getEnvDefault("LLM_BASE_URL", ""),
-		LLMMaxConcurrent:   getEnvDefault("LLM_MAX_CONCURRENT", "1"),
-		EnableObservations:  getEnvDefault("ENABLE_OBSERVATIONS", "false"),
-		DatabaseURL:         getEnvDefault("DATABASE_URL", ""),
-		OtelTracesEnabled:   getEnvDefault("OTEL_TRACES_ENABLED", "false"),
-		OtelEndpoint:        getEnvDefault("OTEL_ENDPOINT", ""),
-		OtelHeaders:         getEnvDefault("OTEL_HEADERS", ""),
-		OtelServiceName:     getEnvDefault("OTEL_SERVICE_NAME", ""),
-		OtelEnvironment:     getEnvDefault("OTEL_ENVIRONMENT", ""),
-	}
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		return cfg
-	}
-	var saved llmConfig
-	if json.Unmarshal(data, &saved) == nil {
-		if saved.LLMProvider != "" {
-			cfg.LLMProvider = saved.LLMProvider
-		}
-		if saved.LLMModel != "" {
-			cfg.LLMModel = saved.LLMModel
-		}
-		if saved.LLMBaseURL != "" {
-			cfg.LLMBaseURL = saved.LLMBaseURL
-		}
-		if saved.LLMMaxConcurrent != "" {
-			cfg.LLMMaxConcurrent = saved.LLMMaxConcurrent
-		}
-		if saved.EnableObservations != "" {
-			cfg.EnableObservations = saved.EnableObservations
-		}
-		if saved.LLMAPIKey != "" {
-			cfg.LLMAPIKey = saved.LLMAPIKey
-		}
-		if saved.DatabaseURL != "" {
-			cfg.DatabaseURL = saved.DatabaseURL
-		}
-		if saved.OtelTracesEnabled != "" {
-			cfg.OtelTracesEnabled = saved.OtelTracesEnabled
-		}
-		if saved.OtelEndpoint != "" {
-			cfg.OtelEndpoint = saved.OtelEndpoint
-		}
-		if saved.OtelHeaders != "" {
-			cfg.OtelHeaders = saved.OtelHeaders
-		}
-		if saved.OtelServiceName != "" {
-			cfg.OtelServiceName = saved.OtelServiceName
-		}
-		if saved.OtelEnvironment != "" {
-			cfg.OtelEnvironment = saved.OtelEnvironment
-		}
-	}
-	// Map legacy provider names to valid Hindsight providers
-	if cfg.LLMProvider == "openai-compatible" {
-		cfg.LLMProvider = "openai"
-	}
-	return cfg
-}
-
-// saveConfig writes config to the persistent JSON file and generates
-// the shell env file that Hindsight's entrypoint sources on startup.
-func saveConfig(cfg llmConfig) error {
-	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
-		return fmt.Errorf("mkdir: %w", err)
-	}
-	data, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal: %w", err)
-	}
-	if err := os.WriteFile(configPath, data, 0644); err != nil {
-		return err
-	}
-	return writeEnvFile(cfg)
-}
-
 // envFilePath is the shell-sourceable env file read by the Hindsight entrypoint.
 const envFilePath = "/data/hindsight.env"
 
-// writeEnvFile writes a shell-sourceable file with Hindsight env vars.
-func writeEnvFile(cfg llmConfig) error {
-	var lines []string
-	set := func(k, v string) {
-		if v != "" {
-			lines = append(lines, fmt.Sprintf("export %s=\"%s\"", k, v))
-		}
+// loadConfig loads the config from YAML (migrating from JSON if needed)
+// and returns the basic fields for the card-based UI.
+func loadConfig() llmConfig {
+	yamlData, err := loadYAMLRaw()
+	if err != nil {
+		log.Printf("WARNING: loadConfig: %v", err)
+		return llmConfig{LLMProvider: "none", LLMMaxConcurrent: "1", EnableObservations: "false", OtelTracesEnabled: "false"}
 	}
-	if cfg.LLMProvider != "" && cfg.LLMProvider != "none" {
-		set("HINDSIGHT_API_LLM_PROVIDER", cfg.LLMProvider)
-		set("HINDSIGHT_API_LLM_MODEL", cfg.LLMModel)
-		set("HINDSIGHT_API_LLM_BASE_URL", cfg.LLMBaseURL)
-		set("HINDSIGHT_API_LLM_MAX_CONCURRENT", cfg.LLMMaxConcurrent)
-		set("HINDSIGHT_API_ENABLE_OBSERVATIONS", cfg.EnableObservations)
-		set("HINDSIGHT_API_LLM_API_KEY", cfg.LLMAPIKey)
+	root, err := parseYAML(yamlData)
+	if err != nil {
+		log.Printf("WARNING: loadConfig parse: %v", err)
+		return llmConfig{LLMProvider: "none", LLMMaxConcurrent: "1", EnableObservations: "false", OtelTracesEnabled: "false"}
 	}
-	// Database — override the compose default if the user configured a custom URL
-	if cfg.DatabaseURL != "" {
-		set("HINDSIGHT_API_DATABASE_URL", cfg.DatabaseURL)
-	}
-	// Monitoring / OpenTelemetry — written regardless of LLM provider
-	if cfg.OtelTracesEnabled == "true" {
-		set("HINDSIGHT_API_OTEL_TRACES_ENABLED", cfg.OtelTracesEnabled)
-		set("HINDSIGHT_API_OTEL_EXPORTER_OTLP_ENDPOINT", cfg.OtelEndpoint)
-		set("HINDSIGHT_API_OTEL_EXPORTER_OTLP_HEADERS", cfg.OtelHeaders)
-		set("HINDSIGHT_API_OTEL_SERVICE_NAME", cfg.OtelServiceName)
-		set("HINDSIGHT_API_OTEL_DEPLOYMENT_ENVIRONMENT", cfg.OtelEnvironment)
-	}
-	content := strings.Join(lines, "\n") + "\n"
-	log.Printf("writing env file to %s (%d vars)", envFilePath, len(lines))
-	return os.WriteFile(envFilePath, []byte(content), 0644)
+	return yamlToLegacy(root)
 }
 
+// handleConfig serves the basic card-based UI config (GET/POST JSON).
+// This reads/writes through the YAML config, preserving advanced settings.
 func handleConfig(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		cfg := loadConfig()
-		// Never send the API key back to the frontend
+		// Never send secrets back to the frontend
 		cfg.LLMAPIKey = ""
-		// Don't send database_url — it may contain credentials; just send whether it's custom
 		cfg.DatabaseURL = ""
 		writeJSON(w, http.StatusOK, cfg)
+
 	case http.MethodPost:
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -643,8 +554,20 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Merge: keep existing secrets if not provided
-		existing := loadConfig()
+		// Load existing YAML to preserve advanced settings
+		yamlData, err := loadYAMLRaw()
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("load config: %v", err)})
+			return
+		}
+		root, err := parseYAML(yamlData)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("parse config: %v", err)})
+			return
+		}
+
+		// Merge: keep existing secrets if not provided in incoming
+		existing := yamlToLegacy(root)
 		if incoming.LLMAPIKey == "" {
 			incoming.LLMAPIKey = existing.LLMAPIKey
 		}
@@ -654,7 +577,6 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 		if incoming.LLMProvider == "" {
 			incoming.LLMProvider = "none"
 		}
-		// Map legacy provider names to valid Hindsight providers
 		if incoming.LLMProvider == "openai-compatible" {
 			incoming.LLMProvider = "openai"
 		}
@@ -668,55 +590,97 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 			incoming.OtelTracesEnabled = "false"
 		}
 
-		if err := saveConfig(incoming); err != nil {
+		// Update the YAML tree with basic fields (preserves advanced settings)
+		legacyToYAML(root, incoming)
+
+		if err := saveYAMLMap(root); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("save config: %v", err)})
 			return
 		}
-		log.Printf("config saved to %s", configPath)
+		log.Printf("config saved via basic UI")
 
 		writeJSON(w, http.StatusOK, map[string]string{
-			"message": "Configuration saved. Disable and re-enable the extension (or restart Docker Desktop) for changes to take effect.",
+			"message": "Configuration saved.",
 		})
+
 	default:
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 	}
 }
 
-// handleApplyConfig pushes the current LLM config to all existing banks
-// via the Hindsight per-bank config PATCH API. This allows runtime config
-// changes without restarting the Hindsight container (which would risk
-// data loss from the embedded Postgres).
+// handleConfigYAML serves the YAML config wrapped in JSON for the DD extension SDK.
+// GET returns {"yaml": "<yaml text>"}; POST accepts a JSON-encoded string body.
+func handleConfigYAML(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		yamlData, err := loadYAMLRaw()
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("load YAML: %v", err)})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"yaml": string(yamlData)})
+
+	case http.MethodPost:
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to read body"})
+			return
+		}
+
+		// The DD extension SDK JSON-encodes the body. Try to unwrap a JSON string first.
+		var yamlText string
+		if err := json.Unmarshal(body, &yamlText); err != nil {
+			// Fallback: treat body as raw YAML text (e.g. from curl)
+			yamlText = string(body)
+		}
+
+		// Validate: must be parseable YAML
+		if _, err := parseYAML([]byte(yamlText)); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("invalid YAML: %v", err)})
+			return
+		}
+
+		if err := saveYAMLRaw([]byte(yamlText)); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("save YAML: %v", err)})
+			return
+		}
+		log.Printf("config saved via YAML editor")
+
+		writeJSON(w, http.StatusOK, map[string]string{
+			"message": "YAML configuration saved and env file regenerated.",
+		})
+
+	default:
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+	}
+}
+
+// handleApplyConfig pushes the current config to all existing banks
+// via the Hindsight per-bank config PATCH API. Uses ALL env vars from
+// the flattened YAML — not just the basic LLM fields.
 func handleApplyConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 		return
 	}
 
-	cfg := loadConfig()
+	// Load and flatten the YAML config
+	yamlData, err := loadYAMLRaw()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("load config: %v", err)})
+		return
+	}
+	root, err := parseYAML(yamlData)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("parse config: %v", err)})
+		return
+	}
 
-	// Build the config override payload using Hindsight's env-var key format
-	overrides := map[string]interface{}{}
-	if cfg.LLMProvider != "" && cfg.LLMProvider != "none" {
-		overrides["HINDSIGHT_API_LLM_PROVIDER"] = cfg.LLMProvider
-		if cfg.LLMModel != "" {
-			overrides["HINDSIGHT_API_LLM_MODEL"] = cfg.LLMModel
-		}
-		if cfg.LLMBaseURL != "" {
-			overrides["HINDSIGHT_API_LLM_BASE_URL"] = cfg.LLMBaseURL
-		}
-		if cfg.LLMAPIKey != "" {
-			overrides["HINDSIGHT_API_LLM_API_KEY"] = cfg.LLMAPIKey
-		}
-		if cfg.LLMMaxConcurrent != "" {
-			overrides["HINDSIGHT_API_LLM_MAX_CONCURRENT"] = cfg.LLMMaxConcurrent
-		}
-	} else {
-		// Provider is "none" — set to mock so Hindsight doesn't require an LLM
-		overrides["HINDSIGHT_API_LLM_PROVIDER"] = "mock"
-	}
-	if cfg.EnableObservations != "" {
-		overrides["HINDSIGHT_API_ENABLE_OBSERVATIONS"] = cfg.EnableObservations
-	}
+	// Build the overrides from ALL HINDSIGHT_API_* vars
+	overrides := flattenYAMLToOverrides(root)
+
+	// Some settings should not be pushed per-bank (they're server-level)
+	// but Hindsight will ignore unknown keys in the PATCH, so it's safe.
 
 	// Fetch the list of banks
 	base := getHindsightBase()
@@ -775,8 +739,8 @@ func handleApplyConfig(w http.ResponseWriter, r *http.Request) {
 		result["errors"] = errors
 	}
 
-	// Note: OTel, database, and some global settings still require a restart to take effect.
-	// We save them to hindsight.env so they'll be picked up on next container start.
+	// Check if settings that need restart were changed
+	cfg := yamlToLegacy(root)
 	needsRestart := false
 	if cfg.OtelTracesEnabled == "true" {
 		needsRestart = true
@@ -795,7 +759,7 @@ func handleApplyConfig(w http.ResponseWriter, r *http.Request) {
 		result["note"] = fmt.Sprintf("%s settings were saved but require an extension restart to take effect. Disable and re-enable the extension in Docker Desktop.", strings.Join(parts, " and "))
 	}
 
-	log.Printf("apply-config: pushed LLM config to %d/%d banks", len(applied), len(bankIDs))
+	log.Printf("apply-config: pushed config to %d/%d banks (%d env vars)", len(applied), len(bankIDs), len(overrides))
 	writeJSON(w, http.StatusOK, result)
 }
 
