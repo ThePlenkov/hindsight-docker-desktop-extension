@@ -31,15 +31,14 @@
                   "default": "concise"
                 },
                 "chunk_size": {
-                  "type": "string",
+                  "oneOf": [{ "type": "string" }, { "type": "integer" }],
                   "description": "Max characters per chunk when using 'chunks' strategy",
-                  "default": "3000"
+                  "default": 3000
                 },
                 "extract_causal_links": {
-                  "type": "string",
-                  "enum": ["true", "false"],
+                  "oneOf": [{ "type": "boolean" }, { "type": "string", "enum": ["true", "false"] }],
                   "description": "Whether to extract cause-effect relationships",
-                  "default": "true"
+                  "default": true
                 },
                 "mission": {
                   "type": "string",
@@ -57,19 +56,19 @@
                   "description": "LLM override for reflect operations. Top models: openai/gpt-oss-120b (Groq), gemini-2.5-flash-lite"
                 },
                 "max_iterations": {
-                  "type": "string",
+                  "oneOf": [{ "type": "string" }, { "type": "integer" }],
                   "description": "Maximum agentic reasoning iterations",
-                  "default": "10"
+                  "default": 10
                 },
                 "max_context_tokens": {
-                  "type": "string",
+                  "oneOf": [{ "type": "string" }, { "type": "integer" }],
                   "description": "Max context window tokens for reflect",
-                  "default": "100000"
+                  "default": 100000
                 },
                 "wall_timeout": {
-                  "type": "string",
+                  "oneOf": [{ "type": "string" }, { "type": "integer" }],
                   "description": "Max wall-clock seconds for a reflect operation",
-                  "default": "300"
+                  "default": 300
                 }
               },
               "additionalProperties": true
@@ -150,22 +149,19 @@
               "description": "Reflect personality traits (1=low, 5=high)",
               "properties": {
                 "skepticism": {
-                  "type": "string",
-                  "enum": ["1", "2", "3", "4", "5"],
+                  "oneOf": [{ "type": "integer", "minimum": 1, "maximum": 5 }, { "type": "string", "enum": ["1", "2", "3", "4", "5"] }],
                   "description": "How critically the agent evaluates claims",
-                  "default": "3"
+                  "default": 3
                 },
                 "literalism": {
-                  "type": "string",
-                  "enum": ["1", "2", "3", "4", "5"],
+                  "oneOf": [{ "type": "integer", "minimum": 1, "maximum": 5 }, { "type": "string", "enum": ["1", "2", "3", "4", "5"] }],
                   "description": "How literally the agent interprets queries",
-                  "default": "3"
+                  "default": 3
                 },
                 "empathy": {
-                  "type": "string",
-                  "enum": ["1", "2", "3", "4", "5"],
+                  "oneOf": [{ "type": "integer", "minimum": 1, "maximum": 5 }, { "type": "string", "enum": ["1", "2", "3", "4", "5"] }],
                   "description": "How much the agent considers emotional context",
-                  "default": "3"
+                  "default": 3
                 }
               },
               "additionalProperties": false
@@ -183,22 +179,19 @@
               "additionalProperties": true
             },
             "enable_observations": {
-              "type": "string",
-              "enum": ["true", "false"],
+              "oneOf": [{ "type": "boolean" }, { "type": "string", "enum": ["true", "false"] }],
               "description": "Enable automatic observation extraction from agent interactions",
-              "default": "false"
+              "default": false
             },
             "skip_llm_verification": {
-              "type": "string",
-              "enum": ["true", "false"],
+              "oneOf": [{ "type": "boolean" }, { "type": "string", "enum": ["true", "false"] }],
               "description": "Skip LLM connectivity check at startup",
-              "default": "true"
+              "default": true
             },
             "lazy_reranker": {
-              "type": "string",
-              "enum": ["true", "false"],
+              "oneOf": [{ "type": "boolean" }, { "type": "string", "enum": ["true", "false"] }],
               "description": "Load reranker model lazily on first use instead of at startup",
-              "default": "true"
+              "default": true
             },
             "log_level": {
               "type": "string",
@@ -207,19 +200,18 @@
               "default": "info"
             },
             "workers": {
-              "type": "string",
+              "oneOf": [{ "type": "string" }, { "type": "integer" }],
               "description": "Number of API worker threads",
-              "default": "1"
+              "default": 1
             },
             "otel": {
               "type": "object",
               "description": "OpenTelemetry distributed tracing configuration",
               "properties": {
                 "traces_enabled": {
-                  "type": "string",
-                  "enum": ["true", "false"],
+                  "oneOf": [{ "type": "boolean" }, { "type": "string", "enum": ["true", "false"] }],
                   "description": "Enable OTLP trace export",
-                  "default": "false"
+                  "default": false
                 },
                 "exporter": {
                   "type": "object",
@@ -270,7 +262,7 @@
       "properties": {
         "provider": {
           "type": "string",
-          "enum": ["openai", "anthropic", "groq", "gemini", "ollama", "lmstudio", "litellm", "mock"],
+          "enum": ["openai", "anthropic", "groq", "gemini", "ollama", "lmstudio", "minimax", "vertexai", "mock"],
           "description": "LLM provider type. Use 'openai' for OpenAI-compatible APIs (including LiteLLM proxy). Use 'mock' to disable LLM."
         },
         "model": {
@@ -288,9 +280,9 @@
           "description": "API key for the LLM provider"
         },
         "max_concurrent": {
-          "type": "string",
+          "oneOf": [{ "type": "string" }, { "type": "integer" }],
           "description": "Max concurrent LLM requests",
-          "default": "1"
+          "default": 1
         }
       },
       "additionalProperties": true

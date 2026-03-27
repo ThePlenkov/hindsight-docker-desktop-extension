@@ -35,6 +35,9 @@ import ErrorOutlineIcon from "@mui/icons-material/ErrorOutline";
 // Use the ESM API-only entrypoint — avoids bundling all built-in
 // language workers (TypeScript, CSS, HTML, JSON) that we don't need.
 import * as monaco from "monaco-editor/esm/vs/editor/editor.api";
+// Register YAML Monarch tokenizer for syntax highlighting (keys, values, booleans, numbers, comments).
+// The API-only entrypoint doesn't include built-in languages — import it explicitly.
+import "monaco-editor/esm/vs/basic-languages/yaml/yaml.contribution";
 import { configureMonacoYaml } from "monaco-yaml";
 import EditorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
 import YamlWorker from "monaco-yaml/yaml.worker?worker";
@@ -76,6 +79,34 @@ configureMonacoYaml(monaco, {
 // Fake file URI so monaco-yaml matches the schema
 const MODEL_URI = monaco.Uri.parse("file:///hindsight.yaml");
 
+// ── Custom Monaco themes for YAML ───────────────────────────────────
+// Distinct colors for keys, string values, numbers, booleans, comments.
+monaco.editor.defineTheme("hindsight-dark", {
+  base: "vs-dark",
+  inherit: true,
+  rules: [
+    { token: "type.yaml",    foreground: "82AAFF", fontStyle: "bold" }, // keys — blue
+    { token: "string.yaml",  foreground: "C3E88D" },                   // strings — green
+    { token: "number.yaml",  foreground: "F78C6C" },                   // numbers — orange
+    { token: "keyword.yaml", foreground: "C792EA" },                   // true/false/null — purple
+    { token: "comment.yaml", foreground: "546E7A", fontStyle: "italic" },
+  ],
+  colors: {},
+});
+
+monaco.editor.defineTheme("hindsight-light", {
+  base: "vs",
+  inherit: true,
+  rules: [
+    { token: "type.yaml",    foreground: "0451A5", fontStyle: "bold" }, // keys — blue
+    { token: "string.yaml",  foreground: "0B7500" },                   // strings — green
+    { token: "number.yaml",  foreground: "B5200D" },                   // numbers — red-orange
+    { token: "keyword.yaml", foreground: "7C4DFF" },                   // true/false/null — purple
+    { token: "comment.yaml", foreground: "8E8E8E", fontStyle: "italic" },
+  ],
+  colors: {},
+});
+
 interface ConfigPanelProps {
   ddClient: any;
 }
@@ -104,12 +135,14 @@ interface SecretInfo {
 
 const LLM_PROVIDERS = [
   { value: "none", label: "None (offline mode)" },
-  { value: "ollama", label: "Ollama (local)" },
-  { value: "lmstudio", label: "LM Studio (local)" },
   { value: "openai", label: "OpenAI / OpenAI-compatible" },
   { value: "anthropic", label: "Anthropic" },
-  { value: "groq", label: "Groq" },
   { value: "gemini", label: "Google Gemini" },
+  { value: "groq", label: "Groq" },
+  { value: "ollama", label: "Ollama (local)" },
+  { value: "lmstudio", label: "LM Studio (local)" },
+  { value: "minimax", label: "MiniMax" },
+  { value: "vertexai", label: "Vertex AI (Google Cloud)" },
   { value: "mock", label: "Mock (testing)" },
 ];
 
@@ -222,7 +255,7 @@ export default function ConfigPanel({ ddClient }: ConfigPanelProps) {
     // Create the Monaco editor instance (raw, no @monaco-editor/react)
     const editor = monaco.editor.create(editorContainerRef.current, {
       model,
-      theme: isDark ? "vs-dark" : "light",
+      theme: isDark ? "hindsight-dark" : "hindsight-light",
       automaticLayout: true,
       minimap: { enabled: false },
       fontSize: 13,
@@ -264,7 +297,7 @@ export default function ConfigPanel({ ddClient }: ConfigPanelProps) {
 
   // Sync Monaco theme with MUI dark/light mode
   useEffect(() => {
-    monaco.editor.setTheme(isDark ? "vs-dark" : "light");
+    monaco.editor.setTheme(isDark ? "hindsight-dark" : "hindsight-light");
   }, [isDark]);
 
   // Push secret status updates to Monaco decorations
@@ -298,14 +331,27 @@ export default function ConfigPanel({ ddClient }: ConfigPanelProps) {
   };
 
   // Apply config to all existing banks
-  const applyConfig = useCallback(async (): Promise<{ applied: number; note?: string; errors?: string[] }> => {
+  const applyConfig = useCallback(async (): Promise<{ applied: number; note?: string; errors?: string[]; needs_restart?: boolean }> => {
     setSaveStatus("Applying configuration to Hindsight...");
     const res = await ddClient.extension.vm?.service?.post("/apply-config");
     return {
       applied: res?.bank_count ?? 0,
       note: res?.note,
       errors: res?.errors,
+      needs_restart: res?.needs_restart ?? false,
     };
+  }, [ddClient]);
+
+  // Restart the extension (restarts all VM services including Hindsight)
+  const restartExtension = useCallback(async () => {
+    setSaveStatus("Restarting extension to apply changes...");
+    try {
+      await ddClient.docker.cli.exec("extension", [
+        "update", "--force", "pplenkov/agent-memory:latest",
+      ]);
+    } catch {
+      // Extension update will kill this UI, so errors here are expected
+    }
   }, [ddClient]);
 
   // Save secrets (from the Secrets card)
@@ -359,6 +405,12 @@ export default function ConfigPanel({ ddClient }: ConfigPanelProps) {
       await fetchSecrets();
 
       const result = await applyConfig();
+
+      if (result.needs_restart) {
+        await restartExtension();
+        return; // UI will reload after restart
+      }
+
       setSaveStatus("");
 
       if (result.errors && result.errors.length > 0) {
@@ -369,10 +421,6 @@ export default function ConfigPanel({ ddClient }: ConfigPanelProps) {
       } else {
         setSaved(true);
         setTimeout(() => setSaved(false), 10000);
-      }
-
-      if (result.note) {
-        setSaveError(result.note);
       }
     } catch (e: any) {
       setSaveStatus("");
@@ -404,6 +452,12 @@ export default function ConfigPanel({ ddClient }: ConfigPanelProps) {
 
       await fetchSecrets();
       const result = await applyConfig();
+
+      if (result.needs_restart) {
+        await restartExtension();
+        return; // UI will reload after restart
+      }
+
       setSaveStatus("");
 
       if (result.errors && result.errors.length > 0) {
@@ -414,10 +468,6 @@ export default function ConfigPanel({ ddClient }: ConfigPanelProps) {
       } else {
         setSaved(true);
         setTimeout(() => setSaved(false), 10000);
-      }
-
-      if (result.note) {
-        setSaveError(result.note);
       }
     } catch (e: any) {
       setSaveStatus("");

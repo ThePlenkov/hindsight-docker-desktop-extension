@@ -29,87 +29,87 @@ hindsight:
   api:
     # ── Global LLM (fallback for retain / reflect / consolidation) ──
     llm:
-      provider: "mock"
-      # model: "gpt-4o-mini"
-      # base_url: "http://host.docker.internal:4000"
+      provider: mock
+      # model: gpt-4o-mini
+      # base_url: http://host.docker.internal:4000
       # api_key: ""
-      max_concurrent: "1"
+      max_concurrent: 1
 
     # ── Per-operation LLM overrides ──────────────────────────────────
     # Retain: fact extraction — benefits from structured-output models
     # Top models: openai/gpt-oss-20b (Groq), gpt-4.1-nano (OpenAI)
     # retain:
     #   llm:
-    #     provider: "groq"
-    #     model: "openai/gpt-oss-20b"
-    #     api_key: "gsk_xxx"
-    #   extraction_mode: "concise"
+    #     provider: groq
+    #     model: openai/gpt-oss-20b
+    #     api_key: gsk_xxx
+    #   extraction_mode: concise
 
     # Reflect: reasoning/synthesis — benefits from fast, capable models
     # Top models: openai/gpt-oss-120b (Groq), gemini-2.5-flash-lite
     # reflect:
     #   llm:
-    #     provider: "groq"
-    #     model: "openai/gpt-oss-120b"
-    #     api_key: "gsk_xxx"
+    #     provider: groq
+    #     model: openai/gpt-oss-120b
+    #     api_key: gsk_xxx
 
     # Consolidation: observation synthesis
     # consolidation:
     #   llm:
-    #     provider: "groq"
-    #     model: "openai/gpt-oss-20b"
+    #     provider: groq
+    #     model: openai/gpt-oss-20b
 
     # ── Embeddings ───────────────────────────────────────────────────
     # embeddings:
-    #   provider: "local"               # local, openai, cohere, tei, litellm
-    #   local_model: "BAAI/bge-small-en-v1.5"
+    #   provider: local               # local, openai, cohere, tei, litellm
+    #   local_model: BAAI/bge-small-en-v1.5
 
     # ── Reranker ─────────────────────────────────────────────────────
     # reranker:
-    #   provider: "local"               # local, cohere, litellm, rrf
-    #   local_model: "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    #   provider: local               # local, cohere, litellm, rrf
+    #   local_model: cross-encoder/ms-marco-MiniLM-L-6-v2
 
     # ── Observations ─────────────────────────────────────────────────
-    enable_observations: "false"
+    enable_observations: false
 
     # ── Retain pipeline tuning ───────────────────────────────────────
     # retain:
-    #   extraction_mode: "concise"      # concise, verbose, verbatim, chunks, custom
-    #   chunk_size: "3000"
-    #   extract_causal_links: "true"
+    #   extraction_mode: concise      # concise, verbose, verbatim, chunks, custom
+    #   chunk_size: 3000
+    #   extract_causal_links: true
     #   mission: "Focus on technical decisions and architecture choices."
 
     # ── Reflect tuning ───────────────────────────────────────────────
     # reflect:
-    #   max_iterations: "10"
-    #   max_context_tokens: "100000"
-    #   wall_timeout: "300"
+    #   max_iterations: 10
+    #   max_context_tokens: 100000
+    #   wall_timeout: 300
 
     # ── Disposition (1=low, 5=high) ──────────────────────────────────
     # disposition:
-    #   skepticism: "3"
-    #   literalism: "3"
-    #   empathy: "3"
+    #   skepticism: 3
+    #   literalism: 3
+    #   empathy: 3
 
     # ── Database ─────────────────────────────────────────────────────
     # database:
-    #   url: "postgresql://user:pass@host:5432/hindsight"
+    #   url: postgresql://user:pass@host:5432/hindsight
 
     # ── Monitoring ───────────────────────────────────────────────────
     # otel:
-    #   traces_enabled: "true"
+    #   traces_enabled: true
     #   exporter:
     #     otlp:
-    #       endpoint: "http://host.docker.internal:4318"
+    #       endpoint: http://host.docker.internal:4318
     #       headers: ""
-    #   service_name: "hindsight-api"
-    #   deployment_environment: "development"
+    #   service_name: hindsight-api
+    #   deployment_environment: development
 
     # ── Server ───────────────────────────────────────────────────────
-    # log_level: "info"
-    # workers: "1"
-    skip_llm_verification: "true"
-    lazy_reranker: "true"
+    # log_level: info
+    # workers: 1
+    skip_llm_verification: true
+    lazy_reranker: true
 `
 
 // flattenMap recursively flattens a nested YAML map to SCREAMING_SNAKE env vars.

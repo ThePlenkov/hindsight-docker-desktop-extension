@@ -772,14 +772,7 @@ func handleApplyConfig(w http.ResponseWriter, r *http.Request) {
 		needsRestart = true
 	}
 	if needsRestart {
-		var parts []string
-		if cfg.OtelTracesEnabled == "true" {
-			parts = append(parts, "OpenTelemetry")
-		}
-		if cfg.DatabaseURL != "" {
-			parts = append(parts, "Database URL")
-		}
-		result["note"] = fmt.Sprintf("%s settings were saved but require an extension restart to take effect. Disable and re-enable the extension in Docker Desktop.", strings.Join(parts, " and "))
+		result["needs_restart"] = true
 	}
 
 	log.Printf("apply-config: pushed config to %d/%d banks (%d env vars)", len(applied), len(bankIDs), len(overrides))
